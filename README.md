@@ -1,8 +1,9 @@
 # serverless-kube-watch-trigger
-// TODO(user): Add simple overview of use/purpose
+A lightweight Kubernetes operator that turns **Kubernetes API server watch events into trigger sources** for serverless functions and external systems. It allows you to declaratively define *when* and *how* functions or webhooks should fire in response to changes in Kubernetes resources — without modifying the API server or deploying heavy eventing frameworks.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`Serverless-kube-watch-trigger` bridges the gap between **Kubernetes-native resource events** and **serverless workloads**.  
+At its core, it watches selected Kubernetes resources (built-in or CRDs) using efficient watch streams, and then dispatches structured trigger events based on user-defined specifications. These triggers can launch serverless functions (e.g. OpenFaaS, Knative), send webhooks, or integrate with external systems such as CI/CD pipelines or monitoring tools.
 
 ## Getting Started
 
@@ -110,26 +111,34 @@ the '--force' flag and manually ensure that any custom configuration
 previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
 is manually re-applied afterwards.
 
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+## 🤝 Contribution Guide
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+We welcome and encourage contributions from the community! Whether it's a bug fix, a new feature, or an improvement to the documentation, your help is greatly appreciated.
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Before you get started, please take a moment to review our guidelines:
 
-## License
+- Read the Documentation: Familiarize yourself with the framework's architecture and existing features.
+- Open an Issue: For any significant changes or new features, please open an issue first to discuss the idea. This helps prevent duplicated work and ensures alignment with the project's goals.
+- Fork the Repository: Fork the repository to your own GitHub account.
+- Create a Branch: Create a new branch for your feature or bug fix: git checkout -b feature-my-awesome-feature.
+- Commit Your Changes: Make your changes and commit them with a clear and descriptive message.
+- Submit a Pull Request: Push your branch to your forked repository and open a pull request against the main branch of this repository. Please provide a clear description of your changes in the PR.
 
-Copyright 2025.
+We are committed to providing a friendly, safe, and welcoming environment for all, regardless of background or experience. We are following Kubernetes Please see them [Code of Conduct](https://kubernetes.io/community/code-of-conduct/) for more details.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+## 🙏 Share Feedback and Report Issues
 
-    http://www.apache.org/licenses/LICENSE-2.0
+Your feedback is invaluable in helping us improve this framework. If you encounter any issues, have a suggestion for a new feature, or simply want to share your experience, we want to hear from you!
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+- Report Bugs: If you find a bug, please open a [GitHub Issue](https://github.com/mhmxs/serverless-kube-watch-trigger/issues). Include as much detail as possible, such as steps to reproduce the bug, expected behavior, and your environment (e.g., Kubernetes version, Go version).
+- Request a Feature: If you have an idea for a new feature, open a [GitHub Issue](https://github.com/mhmxs/serverless-kube-watch-trigger/issues) and use the feature request label. Describe the use case and how the new feature would benefit the community.
+- Ask a Question: For general questions or discussions, please use the [GitHub Discussions](https://github.com/mhmxs/serverless-kube-watch-trigger/discussions).
+
+## 📝 License
+
+This project is licensed under the BSD 3-Clause "New" or "Revised" License. See the LICENSE file for details.
+
+## ✨ Special Thanks
+
+We'd like to extend our gratitude to the Kubernetes community and the developers of related projects like controller-runtime and kubebuilder for their foundational work that inspired and enabled the creation of this framework.
 

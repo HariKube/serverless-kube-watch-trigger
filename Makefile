@@ -241,6 +241,13 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $(1)-$(3) $(1)
 endef
 
+package: kustomize manifests generate
+	rm -rf package ; mkdir package
+
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+
+	$(KUSTOMIZE) build config/default >> package/bundle.yaml
+	
 KUBE_BUILDER_VERSION?=v4.6.0
 KIND_VERSION?=v0.30.0
 KUBE_VERSION?=v1.34.0

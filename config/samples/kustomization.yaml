@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- triggers_v1_openfaastrigger.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

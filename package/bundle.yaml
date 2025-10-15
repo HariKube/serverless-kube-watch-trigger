@@ -1,0 +1,414 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+    control-plane: controller-manager
+  name: serverless-kube-watch-trigger-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: openfaastriggers.triggers.harikube.info
+spec:
+  group: triggers.harikube.info
+  names:
+    kind: OpenFaaSTrigger
+    listKind: OpenFaaSTriggerList
+    plural: openfaastriggers
+    singular: openfaastrigger
+  scope: Namespaced
+  versions:
+  - name: v1
+    schema:
+      openAPIV3Schema:
+        description: OpenFaaSTrigger is the Schema for the openfaastriggers API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OpenFaaSTriggerSpec defines the desired state of OpenFaaSTrigger.
+            properties:
+              basicAuth:
+                description: BasicAuth represents the basic authentication details.
+                properties:
+                  secretKeyRef:
+                    description: SecretKeyRef represents the password secret reference.
+                    properties:
+                      key:
+                        description: The key of the secret to select from.  Must be
+                          a valid secret key.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the Secret or its key must be
+                          defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  user:
+                    description: User represents the name of the user.
+                    type: string
+                required:
+                - secretKeyRef
+                - user
+                type: object
+              endpoint:
+                description: Endpoint represents the trigger endpount
+                type: string
+              watch:
+                description: Watch represents the objects to watch in kubectl query
+                  syntax.
+                type: string
+            required:
+            - endpoint
+            - watch
+            type: object
+          status:
+            description: OpenFaaSTriggerStatus defines the observed state of OpenFaaSTrigger.
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-leader-election-role
+  namespace: serverless-kube-watch-trigger-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serverless-kube-watch-trigger-manager-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serverless-kube-watch-trigger-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serverless-kube-watch-trigger-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-openfaastrigger-admin-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers
+  verbs:
+  - '*'
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-openfaastrigger-editor-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-openfaastrigger-viewer-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - openfaastriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-leader-election-rolebinding
+  namespace: serverless-kube-watch-trigger-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: serverless-kube-watch-trigger-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: serverless-kube-watch-trigger-manager-role
+subjects:
+- kind: ServiceAccount
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: serverless-kube-watch-trigger-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: serverless-kube-watch-trigger-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+    control-plane: controller-manager
+  name: serverless-kube-watch-trigger-controller-manager-metrics-service
+  namespace: serverless-kube-watch-trigger-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+    control-plane: controller-manager
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: serverless-kube-watch-trigger
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: serverless-kube-watch-trigger
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        command:
+        - /manager
+        image: mhmxs/serverless-kube-watch-trigger:--dirty
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports: []
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts: []
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: serverless-kube-watch-trigger-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []
