@@ -74,7 +74,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
+CERT_MANAGER_INSTALL_SKIP ?= true
 KIND_CLUSTER ?= serverless-kube-watch-trigger-test-e2e
 
 .PHONY: setup-test-e2e
@@ -87,7 +87,7 @@ setup-test-e2e:  cleanup-test-e2e ## Set up a Kind cluster for e2e tests if it d
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) PATH=$(LOCALBIN):$(PATH) go test ./test/e2e/ -v -ginkgo.v
+	KIND_CLUSTER=$(KIND_CLUSTER) CERT_MANAGER_INSTALL_SKIP=$(CERT_MANAGER_INSTALL_SKIP) PATH=$(LOCALBIN):$(PATH) go test ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
