@@ -17,60 +17,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-    prepare-test:
-      strategy:
-        matrix:
-          kubeVersion: [ v1.34.0 ]
-      name: Prepare Test
-      runs-on: ubuntu-latest
-      steps:
-      - name: Clone the code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Extract Kind version
-        run: |
-          grep "KIND_VERSION?=" Makefile | cut -d'=' -f2 | awk '{print "kindVersion="$NF}'  >> $GITHUB_OUTPUT
-        id: kind_version
-      
-      - uses: actions/cache/restore@v4
-        id: kind-cache
-        with:
-          path: bin/kind
-          key: ${{ runner.os }}-${{ steps.kind_version.outputs.kindVersion }}
-      
-      - name: Download kind
-        if: steps.kind-cache.outputs.cache-hit != 'true'
-        run: |
-            mkdir -p bin
-            curl -Lo bin/kind https://kind.sigs.k8s.io/dl/${{ steps.kind_version.outputs.kindVersion }}/kind-linux-amd64
-            chmod +x bin/kind
-      
-      - uses: actions/cache/save@v4
-        if: steps.kind-cache.outputs.cache-hit != 'true'
-        with:
-          path: bin/kind
-          key: ${{ steps.kind-cache.outputs.cache-primary-key }}
-     
-      - uses: actions/cache/restore@v4
-        id: kubectl-cache
-        with:
-          path: bin/kubectl
-          key: ${{ runner.os }}-${{ matrix.kubeVersion }}
-      
-      - name: Download kubectl
-        if: steps.kubectl-cache.outputs.cache-hit != 'true'
-        run: |
+  prepare-test:
+    strategy:
+      matrix:
+        kubeVersion: [ v1.34.0 ]
+    name: Prepare Test
+    runs-on: ubuntu-latest
+    steps:
+    - name: Clone the code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Extract Kind version
+      run: |
+        grep "KIND_VERSION?=" Makefile | cut -d'=' -f2 | awk '{print "kindVersion="$NF}'  >> $GITHUB_OUTPUT
+      id: kind_version
+    
+    - uses: actions/cache/restore@v4
+      id: kind-cache
+      with:
+        path: bin/kind
+        key: ${{ runner.os }}-${{ steps.kind_version.outputs.kindVersion }}
+    
+    - name: Download kind
+      if: steps.kind-cache.outputs.cache-hit != 'true'
+      run: |
           mkdir -p bin
-          curl -Lo bin/kubectl "https://dl.k8s.io/release/${{ matrix.kubeVersion }}/bin/linux/amd64/kubectl"
-          chmod +x bin/kubectl
-      
-      - uses: actions/cache/save@v4
-        if: steps.kubectl-cache.outputs.cache-hit != 'true'
-        with:
-          path: bin/kubectl
-          key: ${{ steps.kubectl-cache.outputs.cache-primary-key }}
+          curl -Lo bin/kind https://kind.sigs.k8s.io/dl/${{ steps.kind_version.outputs.kindVersion }}/kind-linux-amd64
+          chmod +x bin/kind
+    
+    - uses: actions/cache/save@v4
+      if: steps.kind-cache.outputs.cache-hit != 'true'
+      with:
+        path: bin/kind
+        key: ${{ steps.kind-cache.outputs.cache-primary-key }}
+    
+    - uses: actions/cache/restore@v4
+      id: kubectl-cache
+      with:
+        path: bin/kubectl
+        key: ${{ runner.os }}-${{ matrix.kubeVersion }}
+    
+    - name: Download kubectl
+      if: steps.kubectl-cache.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p bin
+        curl -Lo bin/kubectl "https://dl.k8s.io/release/${{ matrix.kubeVersion }}/bin/linux/amd64/kubectl"
+        chmod +x bin/kubectl
+    
+    - uses: actions/cache/save@v4
+      if: steps.kubectl-cache.outputs.cache-hit != 'true'
+      with:
+        path: bin/kubectl
+        key: ${{ steps.kubectl-cache.outputs.cache-primary-key }}
   test-e2e:
     strategy:
       matrix:
