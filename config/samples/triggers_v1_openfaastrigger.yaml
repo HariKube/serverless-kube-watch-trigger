@@ -6,4 +6,5 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: openfaastrigger-sample
 spec:
-  # TODO(user): Add fields here
+  watch: configmap -n default -l foo=bar
+  endpoint: http://openfaas/foo/bar/function

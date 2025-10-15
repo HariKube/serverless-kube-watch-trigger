@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -36,10 +37,6 @@ var (
 	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
 	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
 	isCertManagerAlreadyInstalled = false
-
-	// projectImage is the name of the image which will be build and loaded
-	// with the code source changes to be tested.
-	projectImage = "example.com/serverless-kube-watch-trigger:v0.0.1"
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
@@ -54,9 +51,35 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	By("building the manager(Operator) image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
+	cmd := exec.Command("make", "docker-build")
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
+
+	By("finding the git tag for the manager(Operator) image")
+	cmd = exec.Command("git", "describe", "--tags", "--abbrev=0")
+	tag, err := utils.Run(cmd)
+	tag = strings.TrimSuffix(tag, "\n")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to find git tag for the manager(Operator) image")
+
+	By("finding the git diff for the manager(Operator) image")
+	cmd = exec.Command("git", "rev-list", "refs/tags/"+tag+"..HEAD", "--count")
+	diff, err := utils.Run(cmd)
+	diff = strings.TrimSuffix(diff, "\n")
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to find git diff for the manager(Operator) image")
+
+	projectImage := "mhmxs/serverless-kube-watch-trigger:" + tag
+	if diff != "0" {
+		projectImage += "-" + diff
+	}
+
+	By("finding the git status for the manager(Operator) image")
+	cmd = exec.Command("git", "status", "-s")
+	status, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to find git status for the manager(Operator) image")
+
+	if status != "\n" {
+		projectImage += "-dirty"
+	}
 
 	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
 	// built and available before running the tests. Also, remove the following block.

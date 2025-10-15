@@ -31,11 +31,11 @@ type OpenFaaSTriggerSpec struct {
 
 	// +kubebuilder:validation:Required
 	// Watch represents the objects to watch in kubectl query syntax.
-	Watch string `json:"watch,omitempty"`
+	Watch string `json:"watch"`
 
 	// +kubebuilder:validation:Required
 	// Endpoint represents the trigger endpount
-	Endpoint string `json:"endpoint,omitempty"`
+	Endpoint string `json:"endpoint"`
 
 	// +kubebuilder:validation:Optional
 	// BasicAuth represents the basic authentication details.
@@ -46,11 +46,11 @@ type OpenFaaSTriggerSpec struct {
 type BasicAuth struct {
 	// +kubebuilder:validation:Required
 	// User represents the name of the user.
-	User string `json:"user,omitempty"`
+	User string `json:"user"`
 
 	// +kubebuilder:validation:Required
 	// SecretKeyRef represents the password secret reference.
-	PasswordRef corev1.SecretKeySelector `json:"secretKeyRef,omitempty"`
+	PasswordRef corev1.SecretKeySelector `json:"secretKeyRef"`
 }
 
 // OpenFaaSTriggerStatus defines the observed state of OpenFaaSTrigger.
@@ -61,6 +61,8 @@ type OpenFaaSTriggerStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Watch",type="string",JSONPath=".spec.watch"
+// +kubebuilder:printcolumn:name="Endpoint",type="string",JSONPath=".spec.endpoint"
 
 // OpenFaaSTrigger is the Schema for the openfaastriggers API.
 type OpenFaaSTrigger struct {

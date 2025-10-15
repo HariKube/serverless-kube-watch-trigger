@@ -157,6 +157,14 @@ metadata:
   name: serverless-kube-watch-trigger-manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - triggers.harikube.info
   resources:
   - openfaastriggers
@@ -327,25 +335,6 @@ subjects:
 - kind: ServiceAccount
   name: serverless-kube-watch-trigger-controller-manager
   namespace: serverless-kube-watch-trigger-system
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: serverless-kube-watch-trigger
-    control-plane: controller-manager
-  name: serverless-kube-watch-trigger-controller-manager-metrics-service
-  namespace: serverless-kube-watch-trigger-system
-spec:
-  ports:
-  - name: https
-    port: 8443
-    protocol: TCP
-    targetPort: 8443
-  selector:
-    app.kubernetes.io/name: serverless-kube-watch-trigger
-    control-plane: controller-manager
 ---
 apiVersion: apps/v1
 kind: Deployment

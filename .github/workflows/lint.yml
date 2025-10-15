@@ -2,8 +2,20 @@ name: Lint
 
 on:
   push:
-  pull_request:
+    branches-ignore:
+    - release-v**
+    - rc-v**
+    - beta-v**
+    - alpha-v**
+    - dev-v**
 
+  pull_request:
+    branches: [main]
+
+concurrency: 
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+  
 jobs:
   lint:
     name: Run on Ubuntu

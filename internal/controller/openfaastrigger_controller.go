@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -31,11 +32,16 @@ import (
 type OpenFaaSTriggerReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	runningTriggersLock sync.Mutex
+	runningTriggers     map[string]func()
 }
 
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=openfaastriggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=openfaastriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=openfaastriggers/finalizers,verbs=update
+
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -56,6 +62,9 @@ func (r *OpenFaaSTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OpenFaaSTriggerReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.runningTriggersLock = sync.Mutex{}
+	r.runningTriggers = map[string]func(){}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&triggersv1.OpenFaaSTrigger{}).
 		Named("openfaastrigger").
