@@ -10,7 +10,7 @@ on:
     - dev-v**
 
 concurrency: 
-  group: ${{ github.ref_name }}
+  group: ${{ github.ref_name }}-release
   cancel-in-progress: true
 
 permissions:

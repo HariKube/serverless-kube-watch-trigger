@@ -13,7 +13,7 @@ on:
     branches: [main]
 
 concurrency: 
-  group: ${{ github.ref_name }}
+  group: ${{ github.ref_name }}-test-e2e
   cancel-in-progress: true
 
 jobs:
@@ -76,7 +76,7 @@ jobs:
       matrix:
         kubeVersion: [ v1.34.0 ]
     needs: [ prepare-test ]
-    name: Test E2E
+    name: Run on Ubuntu
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
