@@ -107,6 +107,6 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.kubeVersion }}
       
       - name: Running Test E2E
-        run: make test-e2e
+        run: make package test-e2e
         env:
           KUBE_VERSION: ${{ matrix.kubeVersion }}

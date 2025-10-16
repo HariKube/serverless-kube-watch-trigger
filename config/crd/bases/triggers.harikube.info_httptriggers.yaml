@@ -4,14 +4,14 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: openfaastriggers.triggers.harikube.info
+  name: httptriggers.triggers.harikube.info
 spec:
   group: triggers.harikube.info
   names:
-    kind: OpenFaaSTrigger
-    listKind: OpenFaaSTriggerList
-    plural: openfaastriggers
-    singular: openfaastrigger
+    kind: HTTPTrigger
+    listKind: HTTPTriggerList
+    plural: httptriggers
+    singular: httptrigger
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -24,7 +24,7 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: OpenFaaSTrigger is the Schema for the openfaastriggers API.
+        description: HTTPTrigger is the Schema for the HTTPtriggers API.
         properties:
           apiVersion:
             description: |-
@@ -44,7 +44,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: OpenFaaSTriggerSpec defines the desired state of OpenFaaSTrigger.
+            description: HTTPTriggerSpec defines the desired state of HTTPTrigger.
             properties:
               concurrency:
                 default: 1
@@ -352,7 +352,7 @@ spec:
             - meta
             type: object
           status:
-            description: OpenFaaSTriggerStatus defines the observed state of OpenFaaSTrigger.
+            description: HTTPTriggerStatus defines the observed state of HTTPTrigger.
             type: object
         type: object
     served: true

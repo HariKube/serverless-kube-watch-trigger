@@ -22,7 +22,14 @@ spec:
     singular: openfaastrigger
   scope: Namespaced
   versions:
-  - name: v1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.watch
+      name: Watch
+      type: string
+    - jsonPath: .spec.endpoint
+      name: Endpoint
+      type: string
+    name: v1
     schema:
       openAPIV3Schema:
         description: OpenFaaSTrigger is the Schema for the openfaastriggers API.
@@ -163,7 +170,6 @@ rules:
   verbs:
   - get
   - list
-  - watch
 - apiGroups:
   - triggers.harikube.info
   resources:
@@ -366,7 +372,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: mhmxs/serverless-kube-watch-trigger:--dirty
+        image: mhmxs/serverless-kube-watch-trigger:v0.0.1-5-dirty
         livenessProbe:
           httpGet:
             path: /healthz

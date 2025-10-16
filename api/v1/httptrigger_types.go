@@ -23,8 +23,8 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// OpenFaaSTriggerSpec defines the desired state of OpenFaaSTrigger.
-type OpenFaaSTriggerSpec struct {
+// HTTPTriggerSpec defines the desired state of HTTPTrigger.
+type HTTPTriggerSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -32,8 +32,8 @@ type OpenFaaSTriggerSpec struct {
 	HTTP        `json:",inline"`
 }
 
-// OpenFaaSTriggerStatus defines the observed state of OpenFaaSTrigger.
-type OpenFaaSTriggerStatus struct {
+// HTTPTriggerStatus defines the observed state of HTTPTrigger.
+type HTTPTriggerStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 }
@@ -43,24 +43,24 @@ type OpenFaaSTriggerStatus struct {
 // +kubebuilder:printcolumn:name="Watch",type="string",JSONPath=".spec.watch"
 // +kubebuilder:printcolumn:name="Endpoint",type="string",JSONPath=".spec.endpoint"
 
-// OpenFaaSTrigger is the Schema for the openfaastriggers API.
-type OpenFaaSTrigger struct {
+// HTTPTrigger is the Schema for the HTTPtriggers API.
+type HTTPTrigger struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   OpenFaaSTriggerSpec   `json:"spec,omitempty"`
-	Status OpenFaaSTriggerStatus `json:"status,omitempty"`
+	Spec   HTTPTriggerSpec   `json:"spec,omitempty"`
+	Status HTTPTriggerStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// OpenFaaSTriggerList contains a list of OpenFaaSTrigger.
-type OpenFaaSTriggerList struct {
+// HTTPTriggerList contains a list of HTTPTrigger.
+type HTTPTriggerList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []OpenFaaSTrigger `json:"items"`
+	Items           []HTTPTrigger `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&OpenFaaSTrigger{}, &OpenFaaSTriggerList{})
+	SchemeBuilder.Register(&HTTPTrigger{}, &HTTPTriggerList{})
 }
