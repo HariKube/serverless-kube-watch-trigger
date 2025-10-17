@@ -17,9 +17,7 @@ permissions:
   contents: write
 
 env:
-  GOPRIVATE: gitea.mhmxs.duckdns.org/*
-  GITEA_USER: gitaction
-  GITEA_TOKEN: ${{ secrets.GITACTION_TOKEN  }}
+  GITHUB_TOKEN: ${{ secrets.GIT_TOKEN  }}
   
 jobs:
   release:

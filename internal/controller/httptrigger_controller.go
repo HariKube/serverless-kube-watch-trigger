@@ -87,7 +87,7 @@ type HTTPTriggerReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := logf.FromContext(ctx).WithValues("name", req.NamespacedName)
+	logger := logf.FromContext(ctx).WithValues("controller", r.Name, "name", req.NamespacedName)
 
 	trigger := triggersv1.HTTPTrigger{}
 	if err := r.Get(ctx, req.NamespacedName, &trigger); err != nil {
@@ -104,7 +104,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	defer r.runningTriggersLock.Unlock()
 
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
-		logger.Info("HTTPTrigger deleted")
+		logger.Info("Trigger deleted")
 
 		if cancel, ok := r.runningTriggers[req.String()]; ok {
 			cancel()
@@ -114,9 +114,9 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		return ctrl.Result{}, nil
 	} else if trigger.Generation == 1 {
-		logger.Info("HTTPTrigger created")
+		logger.Info("Trigger created")
 	} else {
-		logger.Info("HTTPTrigger updated")
+		logger.Info("Trigger updated")
 	}
 
 	if err := r.createTrigger(&trigger); err != nil {
