@@ -15,11 +15,11 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.watch
-      name: Watch
+    - jsonPath: .status.errorReason
+      name: ErrorReason
       type: string
-    - jsonPath: .spec.endpoint
-      name: Endpoint
+    - jsonPath: .status.lastRevision
+      name: LastRevision
       type: string
     name: v1
     schema:
@@ -399,7 +399,12 @@ spec:
             - url
             type: object
           status:
-            description: HTTPTriggerStatus defines the observed state of HTTPTrigger.
+            description: TriggerStatus defines the observed state of Trigger.
+            properties:
+              errorReason:
+                type: string
+              lastRevision:
+                type: string
             type: object
         type: object
     served: true

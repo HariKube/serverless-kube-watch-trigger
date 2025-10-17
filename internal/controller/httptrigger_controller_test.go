@@ -207,7 +207,6 @@ var _ = Describe("HTTPTrigger Controller", func() {
 					}
 
 					webhookCalled.Store(true)
-					<-time.After(time.Second)
 					cancel()
 				})
 

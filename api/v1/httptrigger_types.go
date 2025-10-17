@@ -25,31 +25,22 @@ import (
 
 // HTTPTriggerSpec defines the desired state of HTTPTrigger.
 type HTTPTriggerSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	TriggerSpec `json:",inline"`
 	HTTP        `json:",inline"`
 }
 
-// HTTPTriggerStatus defines the observed state of HTTPTrigger.
-type HTTPTriggerStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-}
-
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Watch",type="string",JSONPath=".spec.watch"
-// +kubebuilder:printcolumn:name="Endpoint",type="string",JSONPath=".spec.endpoint"
+// +kubebuilder:printcolumn:name="ErrorReason",type="string",JSONPath=".status.errorReason"
+// +kubebuilder:printcolumn:name="LastRevision",type="string",JSONPath=".status.lastRevision"
 
 // HTTPTrigger is the Schema for the HTTPtriggers API.
 type HTTPTrigger struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   HTTPTriggerSpec   `json:"spec,omitempty"`
-	Status HTTPTriggerStatus `json:"status,omitempty"`
+	Spec   HTTPTriggerSpec `json:"spec,omitempty"`
+	Status TriggerStatus   `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

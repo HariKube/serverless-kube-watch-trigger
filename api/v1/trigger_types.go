@@ -243,3 +243,9 @@ type Delivery struct {
 	// Retries represents the retries of the request on failure.
 	Retries uint8 `json:"retries,omitempty"`
 }
+
+// TriggerStatus defines the observed state of Trigger.
+type TriggerStatus struct {
+	ErrorReason         string `json:"errorReason,omitempty"`
+	LastResourceVersion string `json:"lastRevision,omitempty"`
+}

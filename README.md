@@ -13,7 +13,7 @@ Please follow the guide in the [release](https://github.com/mhmxs/serverless-kub
 
 ### 📌 Overview
 
-An `(OpenFaaS|HTTP)Trigger` watches a target Kubernetes resource (e.g., `Deployment` or any other Custom Resources), filters events, and sends HTTP requests when matching events happen.
+An `HTTPTrigger` watches a target Kubernetes resource (e.g., `Deployment` or any other Custom Resources), filters events, and sends HTTP requests when matching events happen.
 
 Each trigger consists of:
 
@@ -29,7 +29,7 @@ Each trigger consists of:
 
 ```yaml
 apiVersion: triggers.example.com/v1
-kind: HTTPTrigger # or OpenFaaSTrigger
+kind: HTTPTrigger
 metadata:
   name: full-httptrigger-example
   namespace: default
@@ -198,6 +198,7 @@ Controls the request payload.
 * The `.old` and `.new` objects inside `eventFilter` correspond to the Kubernetes resource states before and after the event.
 * Combine `eventFilter` with label/field selectors for fine-grained control.
 * TLS and BasicAuth can be used together if the target requires both mutual TLS and credentials.
+* Upon any error, the operator first updates the trigger's status field. It then tries to restart the watcher, resuming from the status.lastResourceVersion.
 
 ---
 

@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -64,9 +65,6 @@ type HTTPTriggerReconciler struct {
 	Scheme        *runtime.Scheme
 	DynamicClient *dynamic.DynamicClient
 
-	Name string
-	For  client.Object
-
 	ctx                 context.Context
 	runningTriggersLock sync.Mutex
 	runningTriggers     map[string]func()
@@ -88,7 +86,7 @@ type HTTPTriggerReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := logf.FromContext(ctx).WithValues("controller", r.Name, "name", req.NamespacedName)
+	logger := logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", req.NamespacedName)
 
 	trigger := triggersv1.HTTPTrigger{}
 	if err := r.Get(ctx, req.NamespacedName, &trigger); err != nil {
@@ -96,8 +94,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, nil
 		}
 
-		logger.Error(err, "Failed to fetch TopologyConfig")
-
+		logger.Error(err, "Trigger fetch failed")
 		return ctrl.Result{}, err
 	}
 
@@ -121,7 +118,20 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	if err := r.createTrigger(&trigger); err != nil {
+		logger.Error(err, "Trigger initialization failed")
 		return ctrl.Result{}, err
+	}
+
+	patchedTrigger := trigger.DeepCopy()
+	patchedTrigger.Status.ErrorReason = ""
+	patchedTrigger.Status.LastResourceVersion = "0"
+
+	if err := r.Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+
+		logger.Error(err, "Trigger status update failed")
 	}
 
 	return ctrl.Result{}, nil
@@ -136,8 +146,13 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 		delete(r.runningTriggers, triggerRefName)
 	}
 
+	resourceVersion := "0"
+	if trigger.Status.LastResourceVersion != "" {
+		resourceVersion = trigger.Status.LastResourceVersion
+	}
+
 	listOpts := metav1.ListOptions{
-		ResourceVersion:     "0",
+		ResourceVersion:     resourceVersion,
 		TimeoutSeconds:      ptr.To(int64(60)),
 		Watch:               true,
 		AllowWatchBookmarks: false,
@@ -310,6 +325,8 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 		Chan: reflect.ValueOf(ctx.Done()),
 	})
 
+	lastResourceVersion := resourceVersion
+	lastResourceVersionMutex := sync.Mutex{}
 	handleError := func(err error, logger logr.Logger) {
 		r.runningTriggersLock.Lock()
 		defer r.runningTriggersLock.Unlock()
@@ -318,6 +335,32 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 			logger.Error(err, "Watcher closed")
 			cancel()
 			delete(r.runningTriggers, triggerRefName)
+
+			go func() {
+				lastResourceVersionMutex.Lock()
+				patchedTrigger := trigger.DeepCopy()
+				patchedTrigger.Status.ErrorReason = err.Error()
+				patchedTrigger.Status.LastResourceVersion = lastResourceVersion
+				lastResourceVersionMutex.Unlock()
+
+				for {
+					// TODO patch only if lastResourceVersion is less then current in db.
+					patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
+					if err := r.Patch(patchCtx, patchedTrigger, client.MergeFrom(trigger)); err != nil && !apierrors.IsNotFound(err) {
+						logger.Error(err, "Trigger status update failed")
+
+						patchCancel()
+
+						<-time.After(time.Second)
+
+						continue
+					}
+
+					patchCancel()
+
+					break
+				}
+			}()
 		}
 	}
 
@@ -551,6 +594,25 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 						continue
 					}
 
+					crv, err := strconv.ParseInt(unstructuredObj.Object["metadata"].(map[string]interface{})["resourceVersion"].(string), 10, 64)
+					if err != nil {
+						handleError(err, logger)
+						reqCancel()
+
+						return
+					}
+					lastResourceVersionMutex.Lock()
+					lrv, err := strconv.ParseInt(lastResourceVersion, 10, 64)
+					if err != nil {
+						handleError(err, logger)
+						reqCancel()
+
+						return
+					} else if lrv < crv {
+						lastResourceVersion = unstructuredObj.Object["metadata"].(map[string]interface{})["resourceVersion"].(string)
+					}
+					lastResourceVersionMutex.Unlock()
+
 					reqCancel()
 					if err := resp.Body.Close(); err != nil {
 						handleError(err, logger)
@@ -596,8 +658,8 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(r.For).
-		Named(r.Name).
+		For(&triggersv1.HTTPTrigger{}).
+		Named("httptrigger").
 		WithOptions(controller.Options{
 			NeedLeaderElection:      ptr.To(true),
 			MaxConcurrentReconciles: 1,
