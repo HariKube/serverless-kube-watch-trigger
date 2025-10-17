@@ -18,6 +18,10 @@ package controller
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -46,10 +50,32 @@ var _ = Describe("HTTPTrigger Controller", func() {
 			Name:      resourceName,
 			Namespace: "default",
 		}
-		openfaastrigger := &triggersv1.HTTPTrigger{}
 
 		BeforeEach(func() {
+		})
+
+		AfterEach(func() {
+			resource := &triggersv1.HTTPTrigger{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Cleanup the specific resource instance HTTPTrigger")
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		})
+		It("should successfully reconcile the resource", func() {
 			By("creating the custom resource for the Kind HTTPTrigger")
+			basicAuthSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "trigger-secret",
+					Namespace: "default",
+				},
+				Data: map[string][]byte{
+					"password": []byte("password"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, basicAuthSecret)).To(Succeed())
+
+			openfaastrigger := &triggersv1.HTTPTrigger{}
 			err := k8sClient.Get(ctx, typeNamespacedName, openfaastrigger)
 			if err != nil && errors.IsNotFound(err) {
 				resource := &triggersv1.HTTPTrigger{
@@ -63,49 +89,73 @@ var _ = Describe("HTTPTrigger Controller", func() {
 								Kind:       "ConfigMap",
 								APIVersion: "v1",
 							},
+							Namespaces:    []string{"default"},
+							LabelSelector: []string{"test=true"},
+							EventType: []triggersv1.EventType{
+								triggersv1.EventTypeAdded,
+							},
+							EventFilter: `eq .new.metadata.namespace "default"`,
 						},
 						HTTP: triggersv1.HTTP{
 							URL: triggersv1.URL{
 								Static: ptr.To("http://localhost:28736/hook"),
 							},
 							Method: http.MethodPost,
+							Auth: triggersv1.Auth{
+								BasicAuth: &triggersv1.BasicAuth{
+									User: "user",
+									PasswordRef: corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "trigger-secret",
+										},
+										Key: "password",
+									},
+								},
+							},
+							Headers: triggersv1.Headers{
+								Static: map[string]string{
+									"static": "header",
+								},
+								Template: map[string]string{
+									"template": "{{ .metadata.name }}",
+								},
+								FromSecretRef: map[string]corev1.SecretKeySelector{
+									"password": {
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "trigger-secret",
+										},
+										Key: "password",
+									},
+								},
+							},
+							Body: triggersv1.Body{
+								Template: "{{ .metadata.name }}",
+								Signature: triggersv1.Signature{
+									Header: "signature",
+									KeySecretRef: corev1.SecretKeySelector{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "trigger-secret",
+										},
+										Key: "password",
+									},
+									HMAC: &triggersv1.HMAC{
+										HashType: triggersv1.SignatureHashTypeSHA256,
+									},
+								},
+							},
 							Delivery: triggersv1.Delivery{
 								Timeout: metav1.Duration{
 									Duration: time.Second,
 								},
+								Retries: 5,
 							},
 						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
-		})
 
-		AfterEach(func() {
-			resource := &triggersv1.HTTPTrigger{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
-
-			By("Cleanup the specific resource instance HTTPTrigger")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &HTTPTriggerReconciler{
-				Client:        k8sClient,
-				DynamicClient: dynamicClient,
-				Scheme:        k8sClient.Scheme(),
-
-				ctx:                 context.Background(),
-				runningTriggersLock: sync.Mutex{},
-				runningTriggers:     map[string]func(){},
-			}
-
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
+			By("creating the webhook to call")
 			webhookCalled := atomic.Bool{}
 
 			wg := sync.WaitGroup{}
@@ -113,11 +163,49 @@ var _ = Describe("HTTPTrigger Controller", func() {
 			go func() {
 				defer wg.Done()
 
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
+
+				firstCall := atomic.Bool{}
 
 				mux := http.NewServeMux()
 				mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+					if !firstCall.Swap(true) {
+						http.Error(w, "first call", http.StatusMethodNotAllowed)
+
+						return
+					}
+
+					user, password, ok := r.BasicAuth()
+					if !ok || user != "user" || password != "password" {
+						Expect(ok).To(BeTrue())
+						Expect(user).To(Equal("user"))
+						Expect(password).To(Equal("password"))
+
+						cancel()
+
+						return
+					}
+
+					body, err := io.ReadAll(r.Body)
+					Expect(err).To(Succeed())
+					Expect(string(body)).To(Equal(resourceName))
+
+					hasher := hmac.New(sha256.New, []byte("password"))
+					hasher.Write(body)
+					signatureBytes := hasher.Sum(nil)
+
+					expectedHeader := map[string]string{
+						"static":       "header",
+						"template":     resourceName,
+						"password":     "password",
+						"signature":    hex.EncodeToString(signatureBytes),
+						"Content-Type": "application/json",
+					}
+					for k, v := range expectedHeader {
+						Expect(r.Header.Get(k)).To(Equal(v))
+					}
+
 					webhookCalled.Store(true)
 					<-time.After(time.Second)
 					cancel()
@@ -138,10 +226,32 @@ var _ = Describe("HTTPTrigger Controller", func() {
 				Expect(srv.Shutdown(context.Background())).To(Succeed())
 			}()
 
+			By("Reconciling the created resource")
+			controllerReconciler := &HTTPTriggerReconciler{
+				Client:        k8sClient,
+				DynamicClient: dynamicClient,
+				Scheme:        k8sClient.Scheme(),
+
+				ctx:                 context.Background(),
+				runningTriggersLock: sync.Mutex{},
+				runningTriggers:     map[string]func(){},
+			}
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
 			configMap := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: "default",
+					Labels: map[string]string{
+						"test": "true",
+					},
+					Annotations: map[string]string{
+						"kubectl.kubernetes.io/last-applied-configuration": `{"data": []}`,
+					},
 				},
 			}
 			Expect(k8sClient.Create(ctx, configMap)).To(Succeed())

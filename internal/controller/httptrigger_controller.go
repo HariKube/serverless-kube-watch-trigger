@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"maps"
@@ -530,6 +531,18 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					resp, err := httpClient.Do(req)
 					if err != nil {
 						retryErr = err
+
+						reqCancel()
+
+						<-time.After(time.Second)
+
+						continue
+					} else if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+						if resp == nil {
+							retryErr = errors.New("missing response")
+						} else {
+							retryErr = fmt.Errorf("status code is %d", resp.StatusCode)
+						}
 
 						reqCancel()
 

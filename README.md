@@ -101,7 +101,7 @@ spec:
 
   # --- Body ---
   body:
-    contentType: application/json
+    contentType: application/json # Optional
     template: | # Optional
       {{ toJson . }}
     signature: # Optional
