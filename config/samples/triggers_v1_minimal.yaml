@@ -1,0 +1,18 @@
+apiVersion: triggers.example.com/v1
+kind: HTTPTrigger
+metadata:
+  name: minimal-httptrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  url:
+    static: "https://example.com/hook"
+    # template: "https://example.com/hook/{{ .metadata.name }}"
+    # service:
+    #   name: webhook-svc
+    #   namespace: default
+    #   uri:
+    #     template: "/hook/{{ .metadata.name }}"
+  method: GET

@@ -5,7 +5,219 @@ A lightweight Kubernetes operator that turns **Kubernetes API server watch event
 `Serverless-kube-watch-trigger` bridges the gap between **Kubernetes-native resource events** and **serverless workloads**.  
 At its core, it watches selected Kubernetes resources (built-in or CRDs) using efficient watch streams, and then dispatches structured trigger events based on user-defined specifications. These triggers can launch serverless functions (e.g. OpenFaaS, Knative), send webhooks, or integrate with external systems such as CI/CD pipelines or monitoring tools.
 
+## Installation
+
+Please follow the guide in the [release](https://github.com/mhmxs/serverless-kube-watch-trigger/releases) section.
+
 ## Getting Started
+
+### 📌 Overview
+
+An `(OpenFaaS|HTTP)Trigger` watches a target Kubernetes resource (e.g., `Deployment` or any other Custom Resources), filters events, and sends HTTP requests when matching events happen.
+
+Each trigger consists of:
+
+* **Resource selector** (what to watch)
+* **Event filters** (when to trigger)
+* **Endpoint configuration** (where to send)
+* **Auth / Headers / Body** configuration (what to send)
+* **Delivery policies** (how to deliver)
+
+---
+
+### 🧱 Example
+
+```yaml
+apiVersion: triggers.example.com/v1
+kind: HTTPTrigger # or OpenFaaSTrigger
+metadata:
+  name: full-httptrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  namespaces: # Optional
+    - default
+    - kube-system
+  labelSelectors: # Optional
+    - app=frontend
+    - tier=prod
+  fieldSelectors: # Optional
+    - metadata.name=my-deployment
+  eventTypes: # Optional
+    - ADDED
+    - MODIFIED
+    - DELETED
+  eventFilter: 'ne .old.status.availableReplicas .new.status.availableReplicas' # Optional
+  concurrency: 5 # Optional
+  sendInitialEvents: false # Optional
+
+  # --- Endpoint ---
+  url: # Select one option
+    static: "https://example.com/hook"
+    # template: "https://example.com/hook/{{ .metadata.name }}"
+    # service:
+    #   name: webhook-svc
+    #   namespace: default
+    #   uri:
+    #     template: "/hook/{{ .metadata.name }}"
+  method: POST # Optional
+
+  # --- Authentication ---
+  auth:
+    basicAuth: # Optional
+      user: ci-bot
+      secretKeyRef:
+        name: webhook-pass
+        key: password
+    tls: # Optional
+      caRef:
+        name: webhook-ca
+        key: ca.crt
+      certRef:
+        name: webhook-cert
+        key: tls.crt
+      keyRef:
+        name: webhook-cert
+        key: tls.key
+      insecureSkipVerify: false
+
+  # --- Headers ---
+  headers:
+    static: # Optional
+      X-Static-Token: "fixed-token-value"
+      X-Cluster-ID: "cluster-001"
+    template: # Optional
+      X-Resource-Name: "{{ .metadata.name }}"
+      X-Resource-Namespace: "{{ .metadata.namespace }}"
+    fromSecretRef: # Optional
+      X-Api-Key:
+        name: api-secret
+        key: api-key
+      X-Other-Token:
+        name: extra-secrets
+        key: token
+
+  # --- Body ---
+  body:
+    contentType: application/json
+    template: | # Optional
+      {{ toJson . }}
+    signature: # Optional
+      header: X-Signature
+      keySecretRef:
+        name: sig-key
+        key: key
+      hmac:
+        hashType: SHA512
+
+  # --- Delivery ---
+  delivery:
+    timeout: 30s # Optional
+    retries: 5 # Optional
+```
+
+---
+
+### 🖍 Spec Details
+
+#### 🎯 **Resource Selection**
+
+| Field               | Description                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------- |
+| `resource`          | Target resource kind + API version to watch.                                           |
+| `namespaces`        | List of namespaces to watch.                                                           |
+| `labelSelectors`    | Optional label selectors to filter resources.                                          |
+| `fieldSelectors`    | Optional field selectors to filter resources.                                          |
+| `eventTypes`        | Which events to trigger on (`ADDED`, `MODIFIED`, `DELETED`).                           |
+| `eventFilter`       | Go template expression evaluated on `.old` and `.new` objects. Return true to trigger. |
+| `concurrency`       | Max parallel triggers.                                                                 |
+| `sendInitialEvents` | Whether to emit initial events for existing objects.                                   |
+
+---
+
+#### 🌐 **Endpoint**
+
+One of:
+
+* `url.static` – fixed URL
+* `url.template` – URL template with Go template syntax
+* `url.service` – service name + optional URI strategy (static/template)
+
+`method` defines the HTTP verb (default: `POST`).
+
+---
+
+#### 🔐 **Authentication**
+
+Under `auth`, you may configure one or more of:
+
+* `basicAuth`:
+  Uses username and password from a secret key reference.
+
+* `tls`:
+  mTLS configuration with CA, client cert, and key references.
+
+---
+
+#### 📨 **Headers**
+
+Headers can be defined in three ways:
+
+* `static`: fixed key/value pairs
+* `template`: dynamic values using Go templates
+* `fromSecretRef`: load header values from Kubernetes secrets
+
+---
+
+#### 🧰 **Body**
+
+Controls the request payload.
+
+| Field         | Description                                                                             |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `contentType` | Content type of the body (default: `application/json`).                                 |
+| `template`    | Go template to generate the request body. `{{ toJson . }}` dumps the full event object. |
+| `signature`   | Optional HMAC or static signature added to a header.                                    |
+
+---
+
+#### 🚚 **Delivery**
+
+| Field     | Description                             |
+| --------- | --------------------------------------- |
+| `timeout` | Maximum request duration (default: `10s`). |
+| `retries` | Number of retry attempts on failure.    |
+
+---
+
+### ⚡ Usage Tips
+
+* Use `{{ toJson . }}` to include the **entire event** as JSON in the body.
+* The `.old` and `.new` objects inside `eventFilter` correspond to the Kubernetes resource states before and after the event.
+* Combine `eventFilter` with label/field selectors for fine-grained control.
+* TLS and BasicAuth can be used together if the target requires both mutual TLS and credentials.
+
+---
+
+### 🚀 Apply the Trigger
+
+```bash
+kubectl apply -f full-httptrigger-example.yaml
+```
+
+Then modify or create a matching `Deployment` — the webhook endpoint will receive JSON payloads for every matching event.
+
+---
+
+### 🧪 Debugging
+
+* Use `kubectl describe httptrigger <name>` to see status and events.
+* Check logs of the controller that processes `HTTPTrigger` resources.
+* Use `toPrettyJson` in templates to make payloads human-readable during testing.
+
+## Development
 
 ### Prerequisites
 - go version v1.24.0+

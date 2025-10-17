@@ -31,8 +31,8 @@ const (
 // TriggerSpec defines the desired state of Trigger.
 type TriggerSpec struct {
 	// +kubebuilder:validation:Required
-	// Meta represents the object kind.
-	Meta metav1.TypeMeta `json:"meta"`
+	// Resource represents the object kind.
+	Resource metav1.TypeMeta `json:"resource"`
 
 	// +kubebuilder:validation:Optional
 	// Namespaces represents the namespaces to watch.
@@ -68,15 +68,8 @@ type TriggerSpec struct {
 	SendInitialEvents bool `json:"sendInitialEvents,omitempty"`
 }
 
-// HTTPTrigger defines HTTP based trigger details.
+// HTTP represents HTTP based trigger details.
 type HTTP struct {
-	// +kubebuilder:validation:Required
-	// Endpoint represents different endpoint generators.
-	Endpoint Endpoint `json:"endpoint"`
-}
-
-// Endpoint represents different endpoint generators.
-type Endpoint struct {
 	// +kubebuilder:validation:Required
 	// URL Represents the URL generator strategy.
 	URL URL `json:"url"`
@@ -241,7 +234,7 @@ type Delivery struct {
 	// +kubebuilder:default:='10s'
 	// +kubebuilder:validation:Format=duration
 	// Timeout represents the timeout of the request.
-	Timeout metav1.Duration `json:"compactInterval,omitempty"`
+	Timeout metav1.Duration `json:"timeout,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default:=0

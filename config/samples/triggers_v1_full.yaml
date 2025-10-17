@@ -1,0 +1,78 @@
+apiVersion: triggers.example.com/v1
+kind: HTTPTrigger
+metadata:
+  name: full-httptrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  namespaces:
+    - default
+    - kube-system
+  labelSelectors:
+    - app=frontend
+    - tier=prod
+  fieldSelectors:
+    - metadata.name=my-deployment
+  eventTypes:
+    - ADDED
+    - MODIFIED
+    - DELETED
+  eventFilter: 'ne .old.status.availableReplicas .new.status.availableReplicas'
+  concurrency: 5
+  sendInitialEvents: false
+  url:
+    static: "https://example.com/hook"
+    # template: "https://example.com/hook/{{ .metadata.name }}"
+    # service:
+    #   name: webhook-svc
+    #   namespace: default
+    #   uri:
+    #     template: "/hook/{{ .metadata.name }}"
+  method: POST
+  auth:
+    basicAuth:
+      user: ci-bot
+      secretKeyRef:
+        name: webhook-pass
+        key: password
+    tls:
+      caRef:
+        name: webhook-ca
+        key: ca.crt
+      certRef:
+        name: webhook-cert
+        key: tls.crt
+      keyRef:
+        name: webhook-cert
+        key: tls.key
+      insecureSkipVerify: false
+  headers:
+    static:
+      X-Static-Token: "fixed-token-value"
+      X-Cluster-ID: "cluster-001"
+    template:
+      X-Resource-Name: "{{ .metadata.name }}"
+      X-Resource-Namespace: "{{ .metadata.namespace }}"
+    fromSecretRef:
+      X-Api-Key:
+        name: api-secret
+        key: api-key
+      X-Other-Token:
+        name: extra-secrets
+        key: token
+  body:
+    contentType: application/json
+    template: |
+      {{ toJson . }}
+    signature:
+      header: X-Signature
+      keySecretRef:
+        name: sig-key
+        key: key
+      hmac:
+        hashType: SHA512
+  delivery:
+    timeout: 30s
+    retries: 5

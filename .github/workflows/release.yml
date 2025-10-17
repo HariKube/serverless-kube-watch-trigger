@@ -61,9 +61,11 @@ jobs:
       with:
         milestone-title: ${{ steps.extract_branch.outputs.branch }}
         pre-body: |
-            # Operator
-            
-            `docker pull ${{ vars.REGISTRY }}/${{ vars.REGISTRY_USER }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}`
+            # serverless-kube-watch-trigger
+            A lightweight Kubernetes operator that turns **Kubernetes API server watch events into trigger sources** for serverless functions and external systems. It allows you to declaratively define *when* and *how* functions or webhooks should fire in response to changes in Kubernetes resources — without modifying the API server or deploying heavy eventing frameworks.
+
+            ## Installation
+            `kubectl apply -f https://github.com/mhmxs/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle.yaml
         draft: true
         prerelease: ${{ startsWith(github.ref, 'refs/heads/rc-') || startsWith(github.ref, 'refs/heads/beta-') || startsWith(github.ref, 'refs/heads/alpha-') }}
         files: package/bundle.yaml

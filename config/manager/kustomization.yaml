@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: mhmxs/serverless-kube-watch-trigger
-  newTag: v0.0.1-5-dirty
+  newTag: v0.0.1-7-dirty

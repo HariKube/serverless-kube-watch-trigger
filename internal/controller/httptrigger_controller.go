@@ -136,17 +136,19 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 	}
 
 	listOpts := metav1.ListOptions{
-		ResourceVersion:      "0",
-		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
-		TimeoutSeconds:       ptr.To(int64(60)),
-		SendInitialEvents:    &trigger.Spec.SendInitialEvents,
-		Watch:                true,
-		AllowWatchBookmarks:  false,
-		LabelSelector:        strings.Join(trigger.Spec.LabelSelector, ","),
-		FieldSelector:        strings.Join(trigger.Spec.FieldSelector, ","),
+		ResourceVersion:     "0",
+		TimeoutSeconds:      ptr.To(int64(60)),
+		Watch:               true,
+		AllowWatchBookmarks: false,
+		LabelSelector:       strings.Join(trigger.Spec.LabelSelector, ","),
+		FieldSelector:       strings.Join(trigger.Spec.FieldSelector, ","),
+	}
+	if trigger.Spec.SendInitialEvents {
+		listOpts.SendInitialEvents = ptr.To(true)
+		listOpts.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
 	}
 
-	apiParts := strings.Split(trigger.Spec.Meta.APIVersion, "/")
+	apiParts := strings.Split(trigger.Spec.Resource.APIVersion, "/")
 	if len(apiParts) == 1 {
 		apiParts = append(apiParts, apiParts[0])
 		apiParts[0] = ""
@@ -154,12 +156,12 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 	gvr := schema.GroupVersionResource{
 		Group:    apiParts[0],
 		Version:  apiParts[1],
-		Resource: inflect.Pluralize(strings.ToLower(trigger.Spec.Meta.Kind)),
+		Resource: inflect.Pluralize(strings.ToLower(trigger.Spec.Resource.Kind)),
 	}
 	gvk := schema.GroupVersionKind{
 		Group:   apiParts[0],
 		Version: apiParts[1],
-		Kind:    trigger.Spec.Meta.Kind,
+		Kind:    trigger.Spec.Resource.Kind,
 	}
 
 	triggerEventTypes := slices.Clone(trigger.Spec.EventType)
@@ -179,19 +181,19 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 	defer depFetchCancel()
 
 	var userAuthPassword string
-	if trigger.Spec.Endpoint.Auth.BasicAuth != nil {
+	if trigger.Spec.Auth.BasicAuth != nil {
 		passwordSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Endpoint.Auth.BasicAuth.PasswordRef.Name,
+			Name:      trigger.Spec.Auth.BasicAuth.PasswordRef.Name,
 		}, &passwordSecret); err != nil {
 			return err
 		}
-		userAuthPassword = string(passwordSecret.Data[trigger.Spec.Endpoint.Auth.BasicAuth.PasswordRef.Key])
+		userAuthPassword = string(passwordSecret.Data[trigger.Spec.Auth.BasicAuth.PasswordRef.Key])
 	}
 
 	headerSecrets := map[string]string{}
-	for k, v := range trigger.Spec.Endpoint.Headers.FromSecretRef {
+	for k, v := range trigger.Spec.Headers.FromSecretRef {
 		headerSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
@@ -203,39 +205,39 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 	}
 
 	var signature []byte
-	if trigger.Spec.Endpoint.Body.Signature.KeySecretRef.Name != "" {
+	if trigger.Spec.Body.Signature.KeySecretRef.Name != "" {
 		signatureSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Endpoint.Body.Signature.KeySecretRef.Name,
+			Name:      trigger.Spec.Body.Signature.KeySecretRef.Name,
 		}, &signatureSecret); err != nil {
 			return err
 		}
-		signature = signatureSecret.Data[trigger.Spec.Endpoint.Body.Signature.KeySecretRef.Key]
+		signature = signatureSecret.Data[trigger.Spec.Body.Signature.KeySecretRef.Key]
 	}
 
 	httpTransport := &http.Transport{
 		MaxIdleConns:    int(trigger.Spec.Concurrency),
 		IdleConnTimeout: time.Minute,
 	}
-	if trigger.Spec.Endpoint.Auth.TLS != nil {
+	if trigger.Spec.Auth.TLS != nil {
 		caSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Endpoint.Auth.TLS.CARef.Name,
+			Name:      trigger.Spec.Auth.TLS.CARef.Name,
 		}, &caSecret); err != nil {
 			return err
 		}
 
 		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM(caSecret.Data[trigger.Spec.Endpoint.Auth.TLS.CARef.Key]); !ok {
+		if ok := caCertPool.AppendCertsFromPEM(caSecret.Data[trigger.Spec.Auth.TLS.CARef.Key]); !ok {
 			return fmt.Errorf("error appending CA cert to pool")
 		}
 
 		certSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Endpoint.Auth.TLS.CertRef.Name,
+			Name:      trigger.Spec.Auth.TLS.CertRef.Name,
 		}, &certSecret); err != nil {
 			return err
 		}
@@ -243,27 +245,27 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 		keySecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Endpoint.Auth.TLS.KeyRef.Name,
+			Name:      trigger.Spec.Auth.TLS.KeyRef.Name,
 		}, &keySecret); err != nil {
 			return err
 		}
 
 		clientCert, err := tls.X509KeyPair(
-			certSecret.Data[trigger.Spec.Endpoint.Auth.TLS.CertRef.Key],
-			keySecret.Data[trigger.Spec.Endpoint.Auth.TLS.KeyRef.Key],
+			certSecret.Data[trigger.Spec.Auth.TLS.CertRef.Key],
+			keySecret.Data[trigger.Spec.Auth.TLS.KeyRef.Key],
 		)
 		if err != nil {
 			return err
 		}
 
 		httpTransport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: trigger.Spec.Endpoint.Auth.TLS.InsecureSkipVerify,
+			InsecureSkipVerify: trigger.Spec.Auth.TLS.InsecureSkipVerify,
 			RootCAs:            caCertPool,
 			Certificates:       []tls.Certificate{clientCert},
 		}
 	}
 	httpClient := &http.Client{
-		Timeout:   trigger.Spec.Endpoint.Delivery.Timeout.Duration,
+		Timeout:   trigger.Spec.Delivery.Timeout.Duration,
 		Transport: httpTransport,
 	}
 
@@ -295,7 +297,7 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 		watchers = append(watchers, watcher)
 	}
 
-	cases := []reflect.SelectCase{}
+	cases := make([]reflect.SelectCase, len(watchers))
 	for i, w := range watchers {
 		cases[i] = reflect.SelectCase{
 			Dir:  reflect.SelectRecv,
@@ -392,10 +394,10 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 
 				var url string
 				switch {
-				case trigger.Spec.Endpoint.URL.Static != nil:
-					url = *trigger.Spec.Endpoint.URL.Static
-				case trigger.Spec.Endpoint.URL.Template != nil:
-					renderer, err := template.New("url_template").Parse(*trigger.Spec.Endpoint.URL.Template)
+				case trigger.Spec.URL.Static != nil:
+					url = *trigger.Spec.URL.Static
+				case trigger.Spec.URL.Template != nil:
+					renderer, err := template.New("url_template").Parse(*trigger.Spec.URL.Template)
 					if err != nil {
 						handleError(err, logger)
 
@@ -403,19 +405,19 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					}
 
 					var renderedURL bytes.Buffer
-					if err = renderer.Execute(&renderedURL, unstructuredObj); err != nil {
+					if err = renderer.Execute(&renderedURL, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
 					}
 					url = renderedURL.String()
-				case trigger.Spec.Endpoint.URL.Service != nil:
+				case trigger.Spec.URL.Service != nil:
 					var uri string
 					switch {
-					case trigger.Spec.Endpoint.URL.Service.URI.Static != nil:
-						uri = *trigger.Spec.Endpoint.URL.Service.URI.Static
-					case trigger.Spec.Endpoint.URL.Service.URI.Template != nil:
-						renderer, err := template.New("uri_template").Parse(*trigger.Spec.Endpoint.URL.Service.URI.Template)
+					case trigger.Spec.URL.Service.URI.Static != nil:
+						uri = *trigger.Spec.URL.Service.URI.Static
+					case trigger.Spec.URL.Service.URI.Template != nil:
+						renderer, err := template.New("uri_template").Parse(*trigger.Spec.URL.Service.URI.Template)
 						if err != nil {
 							handleError(err, logger)
 
@@ -423,7 +425,7 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 						}
 
 						var renderedURI bytes.Buffer
-						if err = renderer.Execute(&renderedURI, unstructuredObj); err != nil {
+						if err = renderer.Execute(&renderedURI, unstructuredObj.Object); err != nil {
 							handleError(err, logger)
 
 							return
@@ -435,8 +437,8 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					}
 
 					url = fmt.Sprintf("http://%s/%s/%s",
-						trigger.Spec.Endpoint.URL.Service.Name,
-						trigger.Spec.Endpoint.URL.Service.Namespace,
+						trigger.Spec.URL.Service.Name,
+						trigger.Spec.URL.Service.Namespace,
 						strings.TrimPrefix(uri, "/"),
 					)
 				default:
@@ -447,8 +449,8 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 				}
 
 				body := ""
-				if trigger.Spec.Endpoint.Body.Template != "" {
-					renderer, err := template.New("body_template_").Parse(trigger.Spec.Endpoint.Body.Template)
+				if trigger.Spec.Body.Template != "" {
+					renderer, err := template.New("body_template_").Parse(trigger.Spec.Body.Template)
 					if err != nil {
 						handleError(err, logger)
 
@@ -456,7 +458,7 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					}
 
 					var renderedBody bytes.Buffer
-					if err = renderer.Execute(&renderedBody, unstructuredObj); err != nil {
+					if err = renderer.Execute(&renderedBody, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -465,10 +467,10 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 				}
 
 				headers := map[string]string{
-					"Content-Type": trigger.Spec.Endpoint.Body.ContentType,
+					"Content-Type": trigger.Spec.Body.ContentType,
 				}
-				maps.Copy(headers, trigger.Spec.Endpoint.Headers.Static)
-				for k, v := range trigger.Spec.Endpoint.Headers.Template {
+				maps.Copy(headers, trigger.Spec.Headers.Static)
+				for k, v := range trigger.Spec.Headers.Template {
 					renderer, err := template.New("header_template_" + k).Parse(v)
 					if err != nil {
 						handleError(err, logger)
@@ -477,21 +479,21 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					}
 
 					var renderedHeader bytes.Buffer
-					if err = renderer.Execute(&renderedHeader, unstructuredObj); err != nil {
+					if err = renderer.Execute(&renderedHeader, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
 					}
 					headers[k] = renderedHeader.String()
 				}
-				for k := range trigger.Spec.Endpoint.Headers.FromSecretRef {
+				for k := range trigger.Spec.Headers.FromSecretRef {
 					headers[k] = headerSecrets[k]
 				}
 
 				switch {
-				case trigger.Spec.Endpoint.Body.Signature.HMAC != nil:
+				case trigger.Spec.Body.Signature.HMAC != nil:
 					var hash func() hash.Hash
-					switch trigger.Spec.Endpoint.Body.Signature.HMAC.HashType {
+					switch trigger.Spec.Body.Signature.HMAC.HashType {
 					case triggersv1.SignatureHashTypeSHA256:
 						hash = sha256.New
 					case triggersv1.SignatureHashTypeSHA512:
@@ -502,14 +504,14 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					hasher.Write([]byte(body))
 					signatureBytes := hasher.Sum(nil)
 
-					headers[trigger.Spec.Endpoint.Body.Signature.Header] = hex.EncodeToString(signatureBytes)
+					headers[trigger.Spec.Body.Signature.Header] = hex.EncodeToString(signatureBytes)
 				}
 
 				var retryErr error
-				for i := 0; i <= int(trigger.Spec.Endpoint.Delivery.Retries); i++ {
-					reqCtx, reqCancel := context.WithTimeout(ctx, trigger.Spec.Endpoint.Delivery.Timeout.Duration)
+				for i := 0; i <= int(trigger.Spec.Delivery.Retries); i++ {
+					reqCtx, reqCancel := context.WithTimeout(ctx, trigger.Spec.Delivery.Timeout.Duration)
 
-					req, err := http.NewRequestWithContext(reqCtx, string(trigger.Spec.Endpoint.Method), url, strings.NewReader(body))
+					req, err := http.NewRequestWithContext(reqCtx, string(trigger.Spec.Method), url, strings.NewReader(body))
 					if err != nil {
 						handleError(err, logger)
 						reqCancel()
@@ -517,8 +519,8 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 						return
 					}
 
-					if trigger.Spec.Endpoint.Auth.BasicAuth != nil {
-						req.SetBasicAuth(trigger.Spec.Endpoint.Auth.BasicAuth.User, userAuthPassword)
+					if trigger.Spec.Auth.BasicAuth != nil {
+						req.SetBasicAuth(trigger.Spec.Auth.BasicAuth.User, userAuthPassword)
 					}
 
 					for k, v := range headers {

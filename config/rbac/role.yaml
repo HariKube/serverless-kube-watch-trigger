@@ -14,7 +14,7 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers
+  - httptriggers
   verbs:
   - create
   - delete
@@ -26,13 +26,13 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers/finalizers
+  - httptriggers/finalizers
   verbs:
   - update
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers/status
+  - httptriggers/status
   verbs:
   - get
   - patch
