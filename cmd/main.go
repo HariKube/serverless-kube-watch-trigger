@@ -212,10 +212,24 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	if err := (&controller.OpenFaaSTriggerReconciler{
+	if err := (&controller.HTTPTriggerReconciler{
+		Name:          "httptrigger",
+		For:           &triggersv1.HTTPTrigger{},
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
+	}).SetupWithManager(ctx, mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
+		os.Exit(1)
+	}
+	if err := (&controller.OpenFaaSTriggerReconciler{
+		HTTPTriggerReconciler: controller.HTTPTriggerReconciler{
+			Name:          "openfaastrigger",
+			For:           &triggersv1.OpenFaaSTrigger{},
+			Client:        mgr.GetClient(),
+			Scheme:        mgr.GetScheme(),
+			DynamicClient: dynamicKubeClient,
+		},
 	}).SetupWithManager(ctx, mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OpenFaaSTrigger")
 		os.Exit(1)

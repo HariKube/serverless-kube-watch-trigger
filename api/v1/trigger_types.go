@@ -8,15 +8,24 @@ import (
 // +kubebuilder:validation:Enum=ADDED;MODIFIED;DELETED
 type EventType string
 
-// +kubebuilder:validation:Enum=SHA256
-type SignatureAlgoType string
+// +kubebuilder:validation:Enum=GET;POST;PUT;PATCH
+type Method string
+
+// +kubebuilder:validation:Enum=SHA256;SHA512
+type SignatureHashType string
 
 const (
 	EventTypeAdded    EventType = "ADDED"
 	EventTypeModified EventType = "MODIFIED"
 	EventTypeDeleted  EventType = "DELETED"
 
-	SignatureAlgoTypeSHA256 SignatureAlgoType = "SHA256"
+	MethodGet   Method = "GET"
+	MethodPost  Method = "POST"
+	MethodPut   Method = "PUT"
+	MethodPatch Method = "PATCH" // RFC 5789
+
+	SignatureHashTypeSHA256 SignatureHashType = "SHA256"
+	SignatureHashTypeSHA512 SignatureHashType = "SHA512"
 )
 
 // TriggerSpec defines the desired state of Trigger.
@@ -43,7 +52,7 @@ type TriggerSpec struct {
 	EventType []EventType `json:"eventTypes,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// EventFilter represents a filter expression. Example: old.status.availableReplicas != new.status.availableReplicas.
+	// EventFilter represents a filter expression, follows Go template syntax. Example: ne .old.status.availableReplicas .new.status.availableReplicas.
 	EventFilter string `json:"eventFilter,omitempty"`
 
 	// +kubebuilder:validation:Optional
@@ -68,17 +77,13 @@ type HTTP struct {
 
 // Endpoint represents different endpoint generators.
 type Endpoint struct {
-	// +kubebuilder:validation:Optional
-	// Static represents a fixed endpoint.
-	Static *string `json:"static,omitempty"`
+	// +kubebuilder:validation:Required
+	// URL Represents the URL generator strategy.
+	URL URL `json:"url"`
 
 	// +kubebuilder:validation:Optional
-	// URLTemplate represents the URL template of the endpoint. Example: https://gateway.example.com/function/foo/{{ .metadata.name }}.
-	URLTemplate *string `json:"uriTemplate,omitempty"`
-
-	// +kubebuilder:validation:Optional
-	// Service represents a service based endpoint.
-	Service *Service `json:"service,omitempty"`
+	// +kubebuilder:default:=POST
+	Method Method `json:"method,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Auth represents different authentication methods.
@@ -97,6 +102,21 @@ type Endpoint struct {
 	Delivery Delivery `json:"delivery,omitempty"`
 }
 
+// URL Represents the URL generator strategy.
+type URL struct {
+	// +kubebuilder:validation:Optional
+	// Static represents a static endpoint.
+	Static *string `json:"static,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Template represents the URL template of the endpoint, follows Go template syntax. Example: https://gateway.example.com/function/foo/{{ .metadata.name }}.
+	Template *string `json:"template,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Service represents a service based endpoint.
+	Service *Service `json:"service,omitempty"`
+}
+
 // Service represents a service based endpoint.
 type Service struct {
 	corev1.LocalObjectReference `json:",inline"`
@@ -105,9 +125,20 @@ type Service struct {
 	// Namespace represents the namespace of service.
 	Namespace string `json:"static,omitempty"`
 
+	// +kubebuilder:validation:Required
+	// URI Represents the URI generator strategy.
+	URI URI `json:"uri"`
+}
+
+// URL Represents the URL generator strategy.
+type URI struct {
 	// +kubebuilder:validation:Optional
-	// URITemplate represents the URI template of the endpoint. Example: /function/foo/{{ .metadata.name }}.
-	URITemplate string `json:"uriTemplate,omitempty"`
+	// Static represents a static endpoint.
+	Static *string `json:"static,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Template represents the URI template of the endpoint, follows Go template syntax. Example: /function/foo/{{ .metadata.name }}.
+	Template *string `json:"template,omitempty"`
 }
 
 // Auth represents different authentication methods.
@@ -139,48 +170,43 @@ type TLS struct {
 	CARef corev1.SecretKeySelector `json:"caRef"`
 
 	// +kubebuilder:validation:Required
+	// CertRef represents the certification secret reference.
+	CertRef corev1.SecretKeySelector `json:"certRef"`
+
+	// +kubebuilder:validation:Required
 	// KeyRef represents the key secret reference.
 	KeyRef corev1.SecretKeySelector `json:"keyRef"`
+
+	// +kubebuilder:validation:Optional
+	// InsecureSkipVerify represents verification of insecure TLS certs.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // Headers represends extra headers of the request.
 type Headers struct {
 	// +kubebuilder:validation:Optional
-	// Static represents fixed header.
+	// Static represents static header.
 	Static map[string]string `json:"static,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// Template represents dynamic header. Example: X-Resource-Name: "{{ .metadata.name }}"
+	// Template represents dynamic header, follows Go template syntax. Example: X-Resource-Name: "{{ .metadata.name }}"
 	Template map[string]string `json:"template,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// FromSecret represents header from secret.
-	FromSecretRef corev1.SecretKeySelector `json:"fromSecretRef,omitempty"`
+	FromSecretRef map[string]corev1.SecretKeySelector `json:"fromSecretRef,omitempty"`
 }
 
 // Body represents the body of the request.
 type Body struct {
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=application/json
 	// ContentType represents the content type of the body.
 	ContentType string `json:"contentType,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Template represents the template to generate body.
 	Template string `json:"template,omitempty"`
-}
-
-// Delivery represents the delivery details.
-type Delivery struct {
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Format=duration
-	// Timeout represents the timeout of the request.
-	Timeout metav1.Duration `json:"compactInterval,omitempty"`
-
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=100
-	// Retries represents the retries of the request on failure.
-	Retries uint8 `json:"retries,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Signature represents message signature generator.
@@ -189,22 +215,38 @@ type Delivery struct {
 
 // Signature represents message signature generator.
 type Signature struct {
+	// +kubebuilder:validation:Required
+	// Header represents the header key of the signature.
+	Header string `json:"header"`
+
+	// +kubebuilder:validation:Required
+	// KeySecretRef represents signature key secret.
+	KeySecretRef corev1.SecretKeySelector `json:"keySecretRef,omitempty"`
+
 	// +kubebuilder:validation:Optional
 	// HMAC represents HMAC message signature generator.
 	HMAC *HMAC `json:"hmac,omitempty"`
 }
 
 type HMAC struct {
-	// +kubebuilder:validation:Required
-	// Header represents the header key of the signature.
-	Header string `json:"hmac"`
-
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default:=SHA256
-	// Algorythm represents the has algorythm type.
-	Algorythm SignatureAlgoType `json:"algorythm,omitempty"`
+	// HashType represents the hash type.
+	HashType SignatureHashType `json:"hashType,omitempty"`
+}
 
-	// +kubebuilder:validation:Required
-	// KeySecretRef represents signature key secret.
-	KeySecretRef corev1.SecretKeySelector `json:"keySecretRef,omitempty"`
+// Delivery represents the delivery details.
+type Delivery struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:='10s'
+	// +kubebuilder:validation:Format=duration
+	// Timeout represents the timeout of the request.
+	Timeout metav1.Duration `json:"compactInterval,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// Retries represents the retries of the request on failure.
+	Retries uint8 `json:"retries,omitempty"`
 }

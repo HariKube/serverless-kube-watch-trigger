@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,7 +31,7 @@ import (
 	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
 )
 
-var _ = Describe("OpenFaaSTrigger Controller", func() {
+var _ = Describe("HTTPTrigger Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -40,18 +41,25 @@ var _ = Describe("OpenFaaSTrigger Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		openfaastrigger := &triggersv1.OpenFaaSTrigger{}
+		openfaastrigger := &triggersv1.HTTPTrigger{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind OpenFaaSTrigger")
+			By("creating the custom resource for the Kind HTTPTrigger")
 			err := k8sClient.Get(ctx, typeNamespacedName, openfaastrigger)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &triggersv1.OpenFaaSTrigger{
+				resource := &triggersv1.HTTPTrigger{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: triggersv1.HTTPTriggerSpec{
+						TriggerSpec: triggersv1.TriggerSpec{
+							Meta: metav1.TypeMeta{
+								Kind:       "Foo",
+								APIVersion: "bar/v1",
+							},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -59,18 +67,23 @@ var _ = Describe("OpenFaaSTrigger Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &triggersv1.OpenFaaSTrigger{}
+			resource := &triggersv1.HTTPTrigger{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance OpenFaaSTrigger")
+			By("Cleanup the specific resource instance HTTPTrigger")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &OpenFaaSTriggerReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+			controllerReconciler := &HTTPTriggerReconciler{
+				Client:        k8sClient,
+				DynamicClient: dynamicClient,
+				Scheme:        k8sClient.Scheme(),
+
+				ctx:                 context.Background(),
+				runningTriggersLock: sync.Mutex{},
+				runningTriggers:     map[string]func(){},
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

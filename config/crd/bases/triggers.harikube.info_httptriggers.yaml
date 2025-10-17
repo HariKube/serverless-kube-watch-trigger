@@ -121,6 +121,35 @@ spec:
                             - key
                             type: object
                             x-kubernetes-map-type: atomic
+                          certRef:
+                            description: CertRef represents the certification secret
+                              reference.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify represents verification
+                              of insecure TLS certs.
+                            type: boolean
                           keyRef:
                             description: KeyRef represents the key secret reference.
                             properties:
@@ -147,6 +176,7 @@ spec:
                             x-kubernetes-map-type: atomic
                         required:
                         - caRef
+                        - certRef
                         - keyRef
                         type: object
                     type: object
@@ -154,9 +184,57 @@ spec:
                     description: Body represents the body of the request.
                     properties:
                       contentType:
+                        default: application/json
                         description: ContentType represents the content type of the
                           body.
                         type: string
+                      signature:
+                        description: Signature represents message signature generator.
+                        properties:
+                          header:
+                            description: Header represents the header key of the signature.
+                            type: string
+                          hmac:
+                            description: HMAC represents HMAC message signature generator.
+                            properties:
+                              hashType:
+                                default: SHA256
+                                description: HashType represents the hash type.
+                                enum:
+                                - SHA256
+                                - SHA512
+                                - SHA1
+                                - MD5
+                                type: string
+                            type: object
+                          keySecretRef:
+                            description: KeySecretRef represents signature key secret.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - header
+                        - keySecretRef
+                        type: object
                       template:
                         description: Template represents the template to generate
                           body.
@@ -166,73 +244,75 @@ spec:
                     description: Delivery represents the delivery details.
                     properties:
                       compactInterval:
+                        default: '''10s'''
                         description: Timeout represents the timeout of the request.
                         format: duration
                         type: string
                       retries:
+                        default: 0
                         description: Retries represents the retries of the request
                           on failure.
                         maximum: 100
                         minimum: 0
                         type: integer
-                      signature:
-                        description: Signature represents message signature generator.
-                        properties:
-                          hmac:
-                            description: HMAC represents HMAC message signature generator.
-                            properties:
-                              algorythm:
-                                default: SHA256
-                                description: Algorythm represents the has algorythm
-                                  type.
-                                enum:
-                                - SHA256
-                                type: string
-                              hmac:
-                                description: Header represents the header key of the
-                                  signature.
-                                type: string
-                              keySecretRef:
-                                description: KeySecretRef represents signature key
-                                  secret.
-                                properties:
-                                  key:
-                                    description: The key of the secret to select from.  Must
-                                      be a valid secret key.
-                                    type: string
-                                  name:
-                                    default: ""
-                                    description: |-
-                                      Name of the referent.
-                                      This field is effectively required, but due to backwards compatibility is
-                                      allowed to be empty. Instances of this type with an empty value here are
-                                      almost certainly wrong.
-                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                    type: string
-                                  optional:
-                                    description: Specify whether the Secret or its
-                                      key must be defined
-                                    type: boolean
-                                required:
-                                - key
-                                type: object
-                                x-kubernetes-map-type: atomic
-                            required:
-                            - hmac
-                            - keySecretRef
-                            type: object
-                        type: object
                     type: object
                   headers:
                     description: Headers represends extra headers of the request.
                     properties:
                       fromSecretRef:
+                        additionalProperties:
+                          description: SecretKeySelector selects a key of a Secret.
+                          properties:
+                            key:
+                              description: The key of the secret to select from.  Must
+                                be a valid secret key.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret or its key must
+                                be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
                         description: FromSecret represents header from secret.
+                        type: object
+                      static:
+                        additionalProperties:
+                          type: string
+                        description: Static represents static header.
+                        type: object
+                      template:
+                        additionalProperties:
+                          type: string
+                        description: 'Template represents dynamic header, follows
+                          Go template syntax. Example: X-Resource-Name: "{{ .metadata.name
+                          }}"'
+                        type: object
+                    type: object
+                  method:
+                    default: POST
+                    enum:
+                    - GET
+                    - POST
+                    - PUT
+                    - PATCH
+                    type: string
+                  url:
+                    description: URL Represents the URL generator strategy.
+                    properties:
+                      service:
+                        description: Service represents a service based endpoint.
                         properties:
-                          key:
-                            description: The key of the secret to select from.  Must
-                              be a valid secret key.
-                            type: string
                           name:
                             default: ""
                             description: |-
@@ -242,59 +322,40 @@ spec:
                               almost certainly wrong.
                               More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                             type: string
-                          optional:
-                            description: Specify whether the Secret or its key must
-                              be defined
-                            type: boolean
+                          static:
+                            description: Namespace represents the namespace of service.
+                            type: string
+                          uri:
+                            description: URI Represents the URI generator strategy.
+                            properties:
+                              static:
+                                description: Static represents a static endpoint.
+                                type: string
+                              template:
+                                description: 'Template represents the URI template
+                                  of the endpoint, follows Go template syntax. Example:
+                                  /function/foo/{{ .metadata.name }}.'
+                                type: string
+                            type: object
                         required:
-                        - key
+                        - uri
                         type: object
                         x-kubernetes-map-type: atomic
                       static:
-                        additionalProperties:
-                          type: string
-                        description: Static represents fixed header.
-                        type: object
+                        description: Static represents a static endpoint.
+                        type: string
                       template:
-                        additionalProperties:
-                          type: string
-                        description: 'Template represents dynamic header. Example:
-                          X-Resource-Name: "{{ .metadata.name }}"'
-                        type: object
-                    type: object
-                  service:
-                    description: Service represents a service based endpoint.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                      static:
-                        description: Namespace represents the namespace of service.
-                        type: string
-                      uriTemplate:
-                        description: 'URITemplate represents the URI template of the
-                          endpoint. Example: /function/foo/{{ .metadata.name }}.'
+                        description: 'Template represents the URL template of the
+                          endpoint, follows Go template syntax. Example: https://gateway.example.com/function/foo/{{
+                          .metadata.name }}.'
                         type: string
                     type: object
-                    x-kubernetes-map-type: atomic
-                  static:
-                    description: Static represents a fixed endpoint.
-                    type: string
-                  uriTemplate:
-                    description: 'URLTemplate represents the URL template of the endpoint.
-                      Example: https://gateway.example.com/function/foo/{{ .metadata.name
-                      }}.'
-                    type: string
+                required:
+                - url
                 type: object
               eventFilter:
-                description: 'EventFilter represents a filter expression. Example:
-                  old.status.availableReplicas != new.status.availableReplicas.'
+                description: 'EventFilter represents a filter expression, follows
+                  Go template syntax. Example: ne .old.status.availableReplicas .new.status.availableReplicas.'
                 type: string
               eventTypes:
                 default:
