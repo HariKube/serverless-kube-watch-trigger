@@ -98,7 +98,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 						},
 						HTTP: triggersv1.HTTP{
 							URL: triggersv1.URL{
-								Static: ptr.To("http://localhost:28736/hook"),
+								Template: ptr.To("http://localhost:28736/hook/{{ .metadata.name }}"),
 							},
 							Method: http.MethodPost,
 							Auth: triggersv1.Auth{
@@ -169,7 +169,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 				firstCall := atomic.Bool{}
 
 				mux := http.NewServeMux()
-				mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+				mux.HandleFunc("/hook/"+resourceName, func(w http.ResponseWriter, r *http.Request) {
 					if !firstCall.Swap(true) {
 						http.Error(w, "first call", http.StatusMethodNotAllowed)
 
