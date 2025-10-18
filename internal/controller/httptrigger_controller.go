@@ -59,6 +59,11 @@ import (
 	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
 )
 
+const (
+	LastAppliedGenerationAnnotation    = "triggers.harikube.info/last-applied-generation"
+	LastAppliedConfigurationAnnotation = "triggers.harikube.info/last-applied-configuration"
+)
+
 type Watcher struct {
 	Reconciler *HTTPTriggerReconciler
 }
@@ -103,6 +108,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		logger.Error(err, "Trigger fetch failed")
+
 		return ctrl.Result{}, err
 	}
 
@@ -122,42 +128,73 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	} else if trigger.Generation == 1 {
 		logger.Info("Trigger created")
 	} else {
+		if lag, ok := trigger.Annotations[LastAppliedGenerationAnnotation]; ok && trigger.Status.LastResourceVersion == "0" {
+			lastGeneration, err := strconv.ParseInt(lag, 10, 64)
+			if err != nil {
+				logger.Error(err, "Trigger last generation parse failed")
+
+				return ctrl.Result{}, nil
+			}
+
+			if lastGeneration+1 == trigger.Generation {
+				return ctrl.Result{}, nil
+			}
+		}
+
 		logger.Info("Trigger updated")
 	}
 
-	if err := r.createTrigger(&trigger); err != nil {
+	triggerRefName := trigger.Namespace + "/" + trigger.Name
+
+	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
+		cancel()
+		delete(r.runningTriggers, triggerRefName)
+
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.createTrigger(triggerRefName, &trigger); err != nil {
 		logger.Error(err, "Trigger initialization failed")
+
 		return ctrl.Result{}, err
 	}
 
+	triggerJson, err := json.Marshal(&trigger)
+	if err != nil {
+		logger.Error(err, "Trigger 	marshalization failed")
+
+		return ctrl.Result{}, nil
+	}
+
 	patchedTrigger := trigger.DeepCopy()
+	if patchedTrigger.Annotations == nil {
+		patchedTrigger.Annotations = map[string]string{}
+	}
+	patchedTrigger.Annotations[LastAppliedGenerationAnnotation] = strconv.FormatInt(trigger.Generation, 10)
+	patchedTrigger.Annotations[LastAppliedConfigurationAnnotation] = string(triggerJson)
 	patchedTrigger.Status.ErrorReason = ""
 	patchedTrigger.Status.LastResourceVersion = "0"
-
 	if err := r.Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 
 		logger.Error(err, "Trigger status update failed")
+
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
 //nolint:gocyclo
-func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) error {
-	triggerRefName := trigger.Namespace + "/" + trigger.Name
-
-	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
-		cancel()
-		delete(r.runningTriggers, triggerRefName)
-	}
-
+func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
 	resourceVersion := "0"
 	if trigger.Status.LastResourceVersion != "" {
 		resourceVersion = trigger.Status.LastResourceVersion
 	}
+	lastResourceVersion := resourceVersion
+	lastResourceVersionMutex := sync.Mutex{}
 
 	listOpts := metav1.ListOptions{
 		ResourceVersion:     resourceVersion,
@@ -333,8 +370,6 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 		Chan: reflect.ValueOf(ctx.Done()),
 	})
 
-	lastResourceVersion := resourceVersion
-	lastResourceVersionMutex := sync.Mutex{}
 	handleError := func(err error, logger logr.Logger) {
 		r.runningTriggersLock.Lock()
 		defer r.runningTriggersLock.Unlock()
@@ -344,6 +379,10 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 			cancel()
 			delete(r.runningTriggers, triggerRefName)
 
+			for _, w := range watchers {
+				w.Stop()
+			}
+
 			go func() {
 				lastResourceVersionMutex.Lock()
 				patchedTrigger := trigger.DeepCopy()
@@ -352,7 +391,6 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 				lastResourceVersionMutex.Unlock()
 
 				for {
-					// TODO patch only if lastResourceVersion is less then current in db.
 					patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
 					if err := r.Patch(patchCtx, patchedTrigger, client.MergeFrom(trigger)); err != nil && !apierrors.IsNotFound(err) {
 						logger.Error(err, "Trigger status update failed")
@@ -413,7 +451,7 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 					old := map[string]interface{}{}
 					if md, ok := unstructuredObj.Object["metadata"]; ok {
 						if an, ok := md.(map[string]interface{})["annotations"]; ok {
-							if lac, ok := an.(map[string]interface{})["kubectl.kubernetes.io/last-applied-configuration"]; ok {
+							if lac, ok := an.(map[string]interface{})[LastAppliedConfigurationAnnotation]; ok {
 								if err := json.Unmarshal([]byte(lac.(string)), &old); err != nil {
 									handleError(err, logger)
 
@@ -654,7 +692,7 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 	}
 
 	for _, trigger := range existingTriggers.Items {
-		if err := r.createTrigger(&trigger); err != nil {
+		if err := r.createTrigger(trigger.Namespace+"/"+trigger.Name, &trigger); err != nil {
 			for _, tc := range r.runningTriggers {
 				tc()
 			}

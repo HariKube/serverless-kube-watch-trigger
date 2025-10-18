@@ -386,7 +386,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 						"test": "true",
 					},
 					Annotations: map[string]string{
-						"kubectl.kubernetes.io/last-applied-configuration": `{"data": []}`,
+						LastAppliedConfigurationAnnotation: `{"data": []}`,
 					},
 				},
 			}
