@@ -116,7 +116,7 @@ type Service struct {
 
 	// +kubebuilder:validation:Optional
 	// Namespace represents the namespace of service.
-	Namespace string `json:"static,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 
 	// +kubebuilder:validation:Required
 	// URI Represents the URI generator strategy.

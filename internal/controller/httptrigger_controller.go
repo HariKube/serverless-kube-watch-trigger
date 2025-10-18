@@ -320,13 +320,14 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		Transport: httpTransport,
 	}
 
+	resourceClient := r.DynamicClient.Resource(gvr)
 	watchClients := []dynamic.ResourceInterface{}
 	if len(trigger.Spec.Namespaces) != 0 {
 		for _, namespace := range trigger.Spec.Namespaces {
-			watchClients = append(watchClients, r.DynamicClient.Resource(gvr).Namespace(namespace))
+			watchClients = append(watchClients, resourceClient.Namespace(namespace))
 		}
 	} else {
-		watchClients = append(watchClients, r.DynamicClient.Resource(gvr))
+		watchClients = append(watchClients, resourceClient)
 	}
 
 	ctx, cancel := context.WithCancel(r.ctx)

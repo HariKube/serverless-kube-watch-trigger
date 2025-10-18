@@ -190,6 +190,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 							},
 							Namespaces:    []string{"default"},
 							LabelSelector: []string{"test=true"},
+							FieldSelector: []string{"metadata.name=" + resourceName},
 							EventType: []triggersv1.EventType{
 								triggersv1.EventTypeAdded,
 							},
