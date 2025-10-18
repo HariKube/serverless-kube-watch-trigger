@@ -52,7 +52,7 @@ type TriggerSpec struct {
 	EventType []EventType `json:"eventTypes,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// EventFilter represents a filter expression, follows Go template syntax. Example: ne .old.status.availableReplicas .new.status.availableReplicas.
+	// EventFilter represents a filter expression, follows Go template syntax. Example: ne .status.availableReplicas 0.
 	EventFilter string `json:"eventFilter,omitempty"`
 
 	// +kubebuilder:validation:Optional

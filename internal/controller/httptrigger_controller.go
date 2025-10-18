@@ -25,7 +25,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
@@ -60,8 +59,7 @@ import (
 )
 
 const (
-	LastAppliedGenerationAnnotation    = "triggers.harikube.info/last-applied-generation"
-	LastAppliedConfigurationAnnotation = "triggers.harikube.info/last-applied-configuration"
+	LastAppliedGenerationAnnotation = "triggers.harikube.info/last-applied-generation"
 )
 
 type Watcher struct {
@@ -159,19 +157,11 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	triggerJson, err := json.Marshal(&trigger)
-	if err != nil {
-		logger.Error(err, "Trigger 	marshalization failed")
-
-		return ctrl.Result{}, nil
-	}
-
 	patchedTrigger := trigger.DeepCopy()
 	if patchedTrigger.Annotations == nil {
 		patchedTrigger.Annotations = map[string]string{}
 	}
 	patchedTrigger.Annotations[LastAppliedGenerationAnnotation] = strconv.FormatInt(trigger.Generation, 10)
-	patchedTrigger.Annotations[LastAppliedConfigurationAnnotation] = string(triggerJson)
 	patchedTrigger.Status.ErrorReason = ""
 	patchedTrigger.Status.LastResourceVersion = "0"
 	if err := r.Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
@@ -448,19 +438,6 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				}
 
 				if trigger.Spec.EventFilter != "" {
-					old := map[string]interface{}{}
-					if md, ok := unstructuredObj.Object["metadata"]; ok {
-						if an, ok := md.(map[string]interface{})["annotations"]; ok {
-							if lac, ok := an.(map[string]interface{})[LastAppliedConfigurationAnnotation]; ok {
-								if err := json.Unmarshal([]byte(lac.(string)), &old); err != nil {
-									handleError(err, logger)
-
-									continue
-								}
-							}
-						}
-					}
-
 					renderer, err := template.New("filter_template").Parse(fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter))
 					if err != nil {
 						handleError(err, logger)
@@ -469,10 +446,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 
 					var renderedMatch bytes.Buffer
-					if err = renderer.Execute(&renderedMatch, map[string]any{
-						"old": old,
-						"new": unstructuredObj.Object,
-					}); err != nil {
+					if err = renderer.Execute(&renderedMatch, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						continue

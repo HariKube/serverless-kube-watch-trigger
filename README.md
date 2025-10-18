@@ -49,7 +49,7 @@ spec:
     - ADDED
     - MODIFIED
     - DELETED
-  eventFilter: 'ne .old.status.availableReplicas .new.status.availableReplicas' # Optional
+  eventFilter: 'ne .status.availableReplicas 0' # Optional
   concurrency: 5 # Optional
   sendInitialEvents: false # Optional
 
@@ -131,7 +131,7 @@ spec:
 | `labelSelectors`    | Optional label selectors to filter resources.                                          |
 | `fieldSelectors`    | Optional field selectors to filter resources.                                          |
 | `eventTypes`        | Which events to trigger on (`ADDED`, `MODIFIED`, `DELETED`).                           |
-| `eventFilter`       | Go template expression evaluated on `.old` and `.new` objects. Return true to trigger. |
+| `eventFilter`       | Go template expression evaluated on objects. Return true to trigger. |
 | `concurrency`       | Max parallel triggers.                                                                 |
 | `sendInitialEvents` | Whether to emit initial events for existing objects.                                   |
 
@@ -195,7 +195,6 @@ Controls the request payload.
 ### ⚡ Usage Tips
 
 * Use `{{ toJson . }}` to include the **entire event** as JSON in the body.
-* The `.old` and `.new` objects inside `eventFilter` correspond to the Kubernetes resource states before and after the event.
 * Combine `eventFilter` with label/field selectors for fine-grained control.
 * TLS and BasicAuth can be used together if the target requires both mutual TLS and credentials.
 * Upon any error, the operator first updates the trigger's status field. It then tries to restart the watcher, resuming from the status.lastResourceVersion.

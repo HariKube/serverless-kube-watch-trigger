@@ -193,7 +193,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 							EventType: []triggersv1.EventType{
 								triggersv1.EventTypeAdded,
 							},
-							EventFilter: `eq .new.metadata.namespace "default"`,
+							EventFilter: `eq .metadata.namespace "default"`,
 						},
 						HTTP: triggersv1.HTTP{
 							URL: triggersv1.URL{
@@ -384,9 +384,6 @@ var _ = Describe("HTTPTrigger Controller", func() {
 					Namespace: "default",
 					Labels: map[string]string{
 						"test": "true",
-					},
-					Annotations: map[string]string{
-						LastAppliedConfigurationAnnotation: `{"data": []}`,
 					},
 				},
 			}
