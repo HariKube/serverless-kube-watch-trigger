@@ -12,27 +12,27 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: openfaastriggers.triggers.harikube.info
+  name: httptriggers.triggers.harikube.info
 spec:
   group: triggers.harikube.info
   names:
-    kind: OpenFaaSTrigger
-    listKind: OpenFaaSTriggerList
-    plural: openfaastriggers
-    singular: openfaastrigger
+    kind: HTTPTrigger
+    listKind: HTTPTriggerList
+    plural: httptriggers
+    singular: httptrigger
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.watch
-      name: Watch
+    - jsonPath: .status.errorReason
+      name: ErrorReason
       type: string
-    - jsonPath: .spec.endpoint
-      name: Endpoint
+    - jsonPath: .status.lastRevision
+      name: LastRevision
       type: string
     name: v1
     schema:
       openAPIV3Schema:
-        description: OpenFaaSTrigger is the Schema for the openfaastriggers API.
+        description: HTTPTrigger is the Schema for the HTTPtriggers API.
         properties:
           apiVersion:
             description: |-
@@ -52,18 +52,319 @@ spec:
           metadata:
             type: object
           spec:
-            description: OpenFaaSTriggerSpec defines the desired state of OpenFaaSTrigger.
+            description: HTTPTriggerSpec defines the desired state of HTTPTrigger.
             properties:
-              basicAuth:
-                description: BasicAuth represents the basic authentication details.
+              auth:
+                description: Auth represents different authentication methods.
                 properties:
-                  secretKeyRef:
-                    description: SecretKeyRef represents the password secret reference.
+                  basicAuth:
+                    description: BasicAuth represents the basic authentication details.
                     properties:
-                      key:
-                        description: The key of the secret to select from.  Must be
-                          a valid secret key.
+                      secretKeyRef:
+                        description: SecretKeyRef represents the password secret reference.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      user:
+                        description: User represents the name of the user.
                         type: string
+                    required:
+                    - secretKeyRef
+                    - user
+                    type: object
+                  tls:
+                    description: TLS represents TLS authentication details.
+                    properties:
+                      caRef:
+                        description: CARef represents the CA secret reference.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      certRef:
+                        description: CertRef represents the certification secret reference.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      insecureSkipVerify:
+                        description: InsecureSkipVerify represents verification of
+                          insecure TLS certs.
+                        type: boolean
+                      keyRef:
+                        description: KeyRef represents the key secret reference.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - caRef
+                    - certRef
+                    - keyRef
+                    type: object
+                type: object
+              body:
+                description: Body represents the body of the request.
+                properties:
+                  contentType:
+                    default: application/json
+                    description: ContentType represents the content type of the body.
+                    type: string
+                  signature:
+                    description: Signature represents message signature generator.
+                    properties:
+                      header:
+                        description: Header represents the header key of the signature.
+                        type: string
+                      hmac:
+                        description: HMAC represents HMAC message signature generator.
+                        properties:
+                          hashType:
+                            default: SHA256
+                            description: HashType represents the hash type.
+                            enum:
+                            - SHA256
+                            - SHA512
+                            type: string
+                        type: object
+                      keySecretRef:
+                        description: KeySecretRef represents signature key secret.
+                        properties:
+                          key:
+                            description: The key of the secret to select from.  Must
+                              be a valid secret key.
+                            type: string
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          optional:
+                            description: Specify whether the Secret or its key must
+                              be defined
+                            type: boolean
+                        required:
+                        - key
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - header
+                    - keySecretRef
+                    type: object
+                  template:
+                    description: Template represents the template to generate body.
+                    type: string
+                type: object
+              concurrency:
+                default: 1
+                description: Concurency represent the number of parallel triggers.
+                maximum: 100
+                minimum: 0
+                type: integer
+              delivery:
+                description: Delivery represents the delivery details.
+                properties:
+                  retries:
+                    default: 0
+                    description: Retries represents the retries of the request on
+                      failure.
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  timeout:
+                    default: '''10s'''
+                    description: Timeout represents the timeout of the request.
+                    format: duration
+                    type: string
+                type: object
+              eventFilter:
+                description: 'EventFilter represents a filter expression, follows
+                  Go template syntax. Example: ne .old.status.availableReplicas .new.status.availableReplicas.'
+                type: string
+              eventTypes:
+                default:
+                - ADDED
+                - MODIFIED
+                - DELETED
+                description: EventType represents the type of events to trigger.
+                items:
+                  enum:
+                  - ADDED
+                  - MODIFIED
+                  - DELETED
+                  type: string
+                type: array
+              fieldSelectors:
+                description: FieldSelector represents list of field selectors.
+                items:
+                  type: string
+                type: array
+              headers:
+                description: Headers represends extra headers of the request.
+                properties:
+                  fromSecretRef:
+                    additionalProperties:
+                      description: SecretKeySelector selects a key of a Secret.
+                      properties:
+                        key:
+                          description: The key of the secret to select from.  Must
+                            be a valid secret key.
+                          type: string
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret or its key must
+                            be defined
+                          type: boolean
+                      required:
+                      - key
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    description: FromSecret represents header from secret.
+                    type: object
+                  static:
+                    additionalProperties:
+                      type: string
+                    description: Static represents static header.
+                    type: object
+                  template:
+                    additionalProperties:
+                      type: string
+                    description: 'Template represents dynamic header, follows Go template
+                      syntax. Example: X-Resource-Name: "{{ .metadata.name }}"'
+                    type: object
+                type: object
+              labelSelectors:
+                description: LabelSelector represents list of label selectors.
+                items:
+                  type: string
+                type: array
+              method:
+                default: POST
+                enum:
+                - GET
+                - POST
+                - PUT
+                - PATCH
+                type: string
+              namespaces:
+                description: Namespaces represents the namespaces to watch.
+                items:
+                  type: string
+                type: array
+              resource:
+                description: Resource represents the object kind.
+                properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion defines the versioned schema of this representation of an object.
+                      Servers should convert recognized schemas to the latest internal value, and
+                      may reject unrecognized values.
+                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+                    type: string
+                  kind:
+                    description: |-
+                      Kind is a string value representing the REST resource this object represents.
+                      Servers may infer this from the endpoint the client submits requests to.
+                      Cannot be updated.
+                      In CamelCase.
+                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                    type: string
+                type: object
+              sendInitialEvents:
+                default: false
+                description: SendInitialEvents represents initial object state triggers.
+                type: boolean
+              url:
+                description: URL Represents the URL generator strategy.
+                properties:
+                  service:
+                    description: Service represents a service based endpoint.
+                    properties:
                       name:
                         default: ""
                         description: |-
@@ -73,34 +374,45 @@ spec:
                           almost certainly wrong.
                           More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                         type: string
-                      optional:
-                        description: Specify whether the Secret or its key must be
-                          defined
-                        type: boolean
+                      static:
+                        description: Namespace represents the namespace of service.
+                        type: string
+                      uri:
+                        description: URI Represents the URI generator strategy.
+                        properties:
+                          static:
+                            description: Static represents a static endpoint.
+                            type: string
+                          template:
+                            description: 'Template represents the URI template of
+                              the endpoint, follows Go template syntax. Example: /function/foo/{{
+                              .metadata.name }}.'
+                            type: string
+                        type: object
                     required:
-                    - key
+                    - uri
                     type: object
                     x-kubernetes-map-type: atomic
-                  user:
-                    description: User represents the name of the user.
+                  static:
+                    description: Static represents a static endpoint.
                     type: string
-                required:
-                - secretKeyRef
-                - user
+                  template:
+                    description: 'Template represents the URL template of the endpoint,
+                      follows Go template syntax. Example: https://gateway.example.com/function/foo/{{
+                      .metadata.name }}.'
+                    type: string
                 type: object
-              endpoint:
-                description: Endpoint represents the trigger endpount
-                type: string
-              watch:
-                description: Watch represents the objects to watch in kubectl query
-                  syntax.
-                type: string
             required:
-            - endpoint
-            - watch
+            - resource
+            - url
             type: object
           status:
-            description: OpenFaaSTriggerStatus defines the observed state of OpenFaaSTrigger.
+            description: TriggerStatus defines the observed state of Trigger.
+            properties:
+              errorReason:
+                type: string
+              lastRevision:
+                type: string
             type: object
         type: object
     served: true
@@ -161,6 +473,77 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-admin-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - '*'
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-editor-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-viewer-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   name: serverless-kube-watch-trigger-manager-role
 rules:
 - apiGroups:
@@ -173,7 +556,7 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers
+  - httptriggers
   verbs:
   - create
   - delete
@@ -185,116 +568,17 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers/finalizers
+  - httptriggers/finalizers
   verbs:
   - update
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - openfaastriggers/status
+  - httptriggers/status
   verbs:
   - get
   - patch
   - update
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: serverless-kube-watch-trigger-metrics-auth-role
-rules:
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
-  verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: serverless-kube-watch-trigger-metrics-reader
-rules:
-- nonResourceURLs:
-  - /metrics
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-openfaastrigger-admin-role
-rules:
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers
-  verbs:
-  - '*'
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers/status
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-openfaastrigger-editor-role
-rules:
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers/status
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-openfaastrigger-viewer-role
-rules:
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - triggers.harikube.info
-  resources:
-  - openfaastriggers/status
-  verbs:
-  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -329,19 +613,6 @@ subjects:
   name: serverless-kube-watch-trigger-controller-manager
   namespace: serverless-kube-watch-trigger-system
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: serverless-kube-watch-trigger-metrics-auth-rolebinding
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: serverless-kube-watch-trigger-metrics-auth-role
-subjects:
-- kind: ServiceAccount
-  name: serverless-kube-watch-trigger-controller-manager
-  namespace: serverless-kube-watch-trigger-system
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -367,12 +638,12 @@ spec:
     spec:
       containers:
       - args:
-        - --metrics-bind-address=:8443
         - --leader-elect
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: mhmxs/serverless-kube-watch-trigger:v0.0.1-5-dirty
+        image: mhmxs/serverless-kube-watch-trigger:v0.0.1-15-dirty
+        imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
             path: /healthz

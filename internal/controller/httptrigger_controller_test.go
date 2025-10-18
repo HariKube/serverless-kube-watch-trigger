@@ -174,8 +174,8 @@ var _ = Describe("HTTPTrigger Controller", func() {
 			Expect(k8sClient.Create(ctx, triggerSecret)).To(Succeed())
 
 			By("creating the custom resource for the Kind HTTPTrigger")
-			openfaastrigger := &triggersv1.HTTPTrigger{}
-			err = k8sClient.Get(ctx, typeNamespacedName, openfaastrigger)
+			httptrigger := &triggersv1.HTTPTrigger{}
+			err = k8sClient.Get(ctx, typeNamespacedName, httptrigger)
 			if err != nil && errors.IsNotFound(err) {
 				resource := &triggersv1.HTTPTrigger{
 					ObjectMeta: metav1.ObjectMeta{

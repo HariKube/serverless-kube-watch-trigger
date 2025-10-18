@@ -15,7 +15,7 @@ resources:
   controller: true
   domain: harikube.info
   group: triggers
-  kind: OpenFaaSTrigger
+  kind: HTTPTrigger
   path: github.com/mhmxs/serverless-kube-watch-trigger/api/v1
   version: v1
 version: "3"

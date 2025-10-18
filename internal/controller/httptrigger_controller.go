@@ -59,6 +59,14 @@ import (
 	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
 )
 
+type Watcher struct {
+	Reconciler *HTTPTriggerReconciler
+}
+
+func (w *Watcher) Start(ctx context.Context) error {
+	return w.Reconciler.WatchInit(ctx)
+}
+
 // HTTPTriggerReconciler reconciles a HTTPTrigger object
 type HTTPTriggerReconciler struct {
 	client.Client
@@ -633,17 +641,15 @@ func (r *HTTPTriggerReconciler) createTrigger(trigger *triggersv1.HTTPTrigger) e
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
+	r.runningTriggersLock.Lock()
+	defer r.runningTriggersLock.Unlock()
+
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 
-	r.ctx = ctx
-	r.runningTriggersLock = sync.Mutex{}
-	r.runningTriggers = map[string]func(){}
-
 	existingTriggers := triggersv1.HTTPTriggerList{}
-	if err := mgr.GetClient().List(ctx, &existingTriggers); err != nil {
+	if err := r.List(ctx, &existingTriggers); err != nil {
 		return err
 	}
 
@@ -656,6 +662,15 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 			return err
 		}
 	}
+
+	return nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+	r.ctx = ctx
+	r.runningTriggersLock = sync.Mutex{}
+	r.runningTriggers = map[string]func(){}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&triggersv1.HTTPTrigger{}).

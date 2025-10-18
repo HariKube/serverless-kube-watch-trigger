@@ -212,14 +212,16 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	if err := (&controller.HTTPTriggerReconciler{
+	httpReconciler := &controller.HTTPTriggerReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
-	}).SetupWithManager(ctx, mgr); err != nil {
+	}
+	if err := httpReconciler.SetupWithManager(ctx, mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
 		os.Exit(1)
 	}
+	mgr.Add(&controller.Watcher{Reconciler: httpReconciler})
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
