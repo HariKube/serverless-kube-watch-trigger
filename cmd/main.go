@@ -221,7 +221,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
 		os.Exit(1)
 	}
-	mgr.Add(&controller.Watcher{Reconciler: httpReconciler})
+	if err := mgr.Add(&controller.Watcher{Reconciler: httpReconciler}); err != nil {
+		setupLog.Error(err, "unable to create watcher", "controller", "Watcher")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
