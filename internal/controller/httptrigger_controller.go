@@ -32,12 +32,13 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
+	"github.com/facette/natsort"
 	"github.com/go-logr/logr"
 	"github.com/go-openapi/inflect"
 	corev1 "k8s.io/api/core/v1"
@@ -122,7 +123,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
 	} else {
-		if trigger.Status.ErrorResourceVersion == "0" && trigger.Status.LastGeneration == trigger.Generation {
+		if trigger.Status.ErrorReason == "" && trigger.Status.LastGeneration == trigger.Generation {
 			return ctrl.Result{}, nil
 		}
 
@@ -167,8 +168,6 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	if trigger.Status.ErrorResourceVersion != "" {
 		resourceVersion = trigger.Status.ErrorResourceVersion
 	}
-	lastResourceVersion := resourceVersion
-	lastResourceVersionMutex := sync.Mutex{}
 
 	listOpts := metav1.ListOptions{
 		ResourceVersion:     resourceVersion,
@@ -345,25 +344,20 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		Chan: reflect.ValueOf(ctx.Done()),
 	})
 
+	lastResourceVersion := atomic.Pointer[string]{}
+	lastResourceVersion.Store(ptr.To("0"))
+
 	handleError := func(err error, logger logr.Logger) {
 		r.runningTriggersLock.Lock()
 		defer r.runningTriggersLock.Unlock()
 
 		if cancel, ok := r.runningTriggers[triggerRefName]; ok {
 			logger.Error(err, "Watcher closed")
-			cancel()
-			delete(r.runningTriggers, triggerRefName)
-
-			for _, w := range watchers {
-				w.Stop()
-			}
 
 			go func() {
-				lastResourceVersionMutex.Lock()
 				patchedTrigger := trigger.DeepCopy()
 				patchedTrigger.Status.ErrorReason = err.Error()
-				patchedTrigger.Status.ErrorResourceVersion = lastResourceVersion
-				lastResourceVersionMutex.Unlock()
+				patchedTrigger.Status.ErrorResourceVersion = *lastResourceVersion.Load()
 
 				for {
 					patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
@@ -382,6 +376,13 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					break
 				}
 			}()
+
+			cancel()
+			delete(r.runningTriggers, triggerRefName)
+
+			for _, w := range watchers {
+				w.Stop()
+			}
 		}
 	}
 
@@ -605,26 +606,18 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						continue
 					}
 
-					crv, err := strconv.ParseInt(metadata["resourceVersion"].(string), 10, 64)
-					if err != nil {
-						handleError(err, logger)
-						reqCancel()
+					logger.Info("Endpoint successfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
 
-						return
+					for {
+						rv := metadata["resourceVersion"].(string)
+						lrv := lastResourceVersion.Load()
+
+						if natsort.Compare(rv, *lrv) {
+							break
+						} else if lastResourceVersion.CompareAndSwap(lrv, &rv) {
+							break
+						}
 					}
-					lastResourceVersionMutex.Lock()
-					lrv, err := strconv.ParseInt(lastResourceVersion, 10, 64)
-					if err != nil {
-						handleError(err, logger)
-						reqCancel()
-
-						return
-					} else if lrv < crv {
-						lastResourceVersion = metadata["resourceVersion"].(string)
-					}
-					lastResourceVersionMutex.Unlock()
-
-					logger.Info("Endpoint sucessfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
 
 					reqCancel()
 					if err := resp.Body.Close(); err != nil {

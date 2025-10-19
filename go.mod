@@ -3,6 +3,7 @@ module github.com/mhmxs/serverless-kube-watch-trigger
 go 1.24.0
 
 require (
+	github.com/facette/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/go-logr/logr v1.4.2
 	github.com/go-openapi/inflect v0.21.3
 	github.com/onsi/ginkgo/v2 v2.22.0
