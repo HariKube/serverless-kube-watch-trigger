@@ -23,11 +23,14 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.errorTime
+      name: ErrorTime
+      type: string
     - jsonPath: .status.errorReason
       name: ErrorReason
       type: string
-    - jsonPath: .status.lastRevision
-      name: LastRevision
+    - jsonPath: .status.errorResourceVersion
+      name: ErrorResourceVersion
       type: string
     name: v1
     schema:
@@ -236,17 +239,17 @@ spec:
                 default: 1
                 description: Concurency represent the number of parallel triggers.
                 maximum: 100
-                minimum: 0
+                minimum: 1
                 type: integer
               delivery:
                 description: Delivery represents the delivery details.
                 properties:
                   retries:
-                    default: 0
+                    default: 1
                     description: Retries represents the retries of the request on
                       failure.
                     maximum: 100
-                    minimum: 0
+                    minimum: 1
                     type: integer
                   timeout:
                     default: '''10s'''
@@ -256,7 +259,7 @@ spec:
                 type: object
               eventFilter:
                 description: 'EventFilter represents a filter expression, follows
-                  Go template syntax. Example: ne .old.status.availableReplicas .new.status.availableReplicas.'
+                  Go template syntax. Example: ne .status.availableReplicas 0.'
                 type: string
               eventTypes:
                 default:
@@ -374,8 +377,13 @@ spec:
                           almost certainly wrong.
                           More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                         type: string
-                      static:
+                      namespace:
                         description: Namespace represents the namespace of service.
+                        type: string
+                      portName:
+                        description: |-
+                          PortName represents the name of port. If missing first port of the service will be seelcted.
+                          The name defines the protocol also, if missing http is the default.
                         type: string
                       uri:
                         description: URI Represents the URI generator strategy.
@@ -411,8 +419,14 @@ spec:
             properties:
               errorReason:
                 type: string
-              lastRevision:
+              errorResourceVersion:
                 type: string
+              errorTime:
+                format: date-time
+                type: string
+              lastGeneration:
+                format: int64
+                type: integer
             type: object
         type: object
     served: true
@@ -550,9 +564,11 @@ rules:
   - ""
   resources:
   - secrets
+  - services
   verbs:
   - get
   - list
+  - watch
 - apiGroups:
   - triggers.harikube.info
   resources:
@@ -642,7 +658,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: mhmxs/serverless-kube-watch-trigger:v0.0.1-15-dirty
+        image: mhmxs/serverless-kube-watch-trigger:snapshot-dirty
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

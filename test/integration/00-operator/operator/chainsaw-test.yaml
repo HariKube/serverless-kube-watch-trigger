@@ -1,0 +1,30 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: operator
+spec:
+  timeouts:
+    exec: 5m
+  namespace: default
+  skipDelete: true
+  steps:
+  - name: Build operator
+    try:
+    - script:
+        content: make -C ../../../.. package docker-build docker-load
+        env:
+        - name: IMG
+          value: mhmxs/serverless-kube-watch-trigger:snapshot
+  - name: Deploy operator
+    try:
+    - apply:
+        file: ../../../../package/bundle.yaml
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: serverless-kube-watch-trigger-controller-manager 
+            namespace: serverless-kube-watch-trigger-system
+          status:
+            readyReplicas: 1

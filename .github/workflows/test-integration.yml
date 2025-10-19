@@ -1,4 +1,4 @@
-name: E2E Tests
+name: Integration Tests
 
 on:
   push:
@@ -106,7 +106,5 @@ jobs:
           path: bin/kubectl
           key: ${{ runner.os }}-${{ matrix.kubeVersion }}
       
-      - name: Running Test E2E
-        run: make package test-e2e
-        env:
-          KUBE_VERSION: ${{ matrix.kubeVersion }}
+      - name: Running Test Integration
+        run: make package test-integrtion
