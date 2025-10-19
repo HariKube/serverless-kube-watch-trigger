@@ -57,7 +57,7 @@ type TriggerSpec struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default:=1
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// Concurency represent the number of parallel triggers.
 	Concurrency uint8 `json:"concurrency,omitempty"`
@@ -251,7 +251,8 @@ type Delivery struct {
 
 // TriggerStatus defines the observed state of Trigger.
 type TriggerStatus struct {
-	ErrorReason          string `json:"errorReason,omitempty"`
-	ErrorResourceVersion string `json:"errorResourceVersion,omitempty"`
-	LastGeneration       int64  `json:"lastGeneration,omitempty"`
+	ErrorTime            metav1.Time `json:"errorTime,omitempty"`
+	ErrorReason          string      `json:"errorReason,omitempty"`
+	ErrorResourceVersion string      `json:"errorResourceVersion,omitempty"`
+	LastGeneration       int64       `json:"lastGeneration,omitempty"`
 }

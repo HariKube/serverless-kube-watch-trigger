@@ -15,6 +15,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.errorTime
+      name: ErrorTime
+      type: string
     - jsonPath: .status.errorReason
       name: ErrorReason
       type: string
@@ -228,7 +231,7 @@ spec:
                 default: 1
                 description: Concurency represent the number of parallel triggers.
                 maximum: 100
-                minimum: 0
+                minimum: 1
                 type: integer
               delivery:
                 description: Delivery represents the delivery details.
@@ -409,6 +412,9 @@ spec:
               errorReason:
                 type: string
               errorResourceVersion:
+                type: string
+              errorTime:
+                format: date-time
                 type: string
               lastGeneration:
                 format: int64

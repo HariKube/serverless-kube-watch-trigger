@@ -115,31 +115,26 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		if cancel, ok := r.runningTriggers[req.String()]; ok {
 			cancel()
-
-			delete(r.runningTriggers, req.String())
 		}
 
 		return ctrl.Result{}, nil
 	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
 	} else {
-		if trigger.Status.ErrorReason == "" && trigger.Status.LastGeneration == trigger.Generation {
+		if trigger.Status.ErrorTime.IsZero() && trigger.Status.LastGeneration == trigger.Generation {
 			return ctrl.Result{}, nil
 		}
 
 		logger.Info("Trigger updated")
 	}
 
-	triggerRefName := trigger.Namespace + "/" + trigger.Name
-
-	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
+	if cancel, ok := r.runningTriggers[req.String()]; ok {
 		cancel()
-		delete(r.runningTriggers, triggerRefName)
 
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.createTrigger(triggerRefName, &trigger); err != nil {
+	if err := r.createTrigger(req.String(), &trigger); err != nil {
 		logger.Error(err, "Trigger initialization failed")
 
 		return ctrl.Result{}, err
@@ -147,6 +142,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
+	patchedTrigger.Status.ErrorTime = metav1.Time{}
 	patchedTrigger.Status.ErrorReason = ""
 	patchedTrigger.Status.ErrorResourceVersion = "0"
 	if err := r.Status().Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
@@ -380,6 +376,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 			go func() {
 				patchedTrigger := trigger.DeepCopy()
+				patchedTrigger.Status.ErrorTime = metav1.Now()
 				patchedTrigger.Status.ErrorReason = err.Error()
 				patchedTrigger.Status.ErrorResourceVersion = *lastResourceVersion.Load()
 
@@ -446,7 +443,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				if !ok {
 					handleError(fmt.Errorf("event conversion to unstructured failed"), logger)
 
-					continue
+					return
 				}
 
 				if trigger.Spec.EventFilter != "" {
@@ -461,7 +458,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					if err = renderer.Execute(&renderedMatch, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
-						continue
+						return
 					}
 					if renderedMatch.String() != "true" {
 						continue
@@ -481,7 +478,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 
 					var renderedURL bytes.Buffer
-					if err = renderer.Execute(&renderedURL, unstructuredObj.Object); err != nil {
+					if err := renderer.Execute(&renderedURL, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -501,7 +498,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						}
 
 						var renderedURI bytes.Buffer
-						if err = renderer.Execute(&renderedURI, unstructuredObj.Object); err != nil {
+						if err := renderer.Execute(&renderedURI, unstructuredObj.Object); err != nil {
 							handleError(err, logger)
 
 							return
@@ -536,7 +533,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 
 					var renderedBody bytes.Buffer
-					if err = renderer.Execute(&renderedBody, unstructuredObj.Object); err != nil {
+					if err := renderer.Execute(&renderedBody, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -544,8 +541,12 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					body = renderedBody.String()
 				}
 
+				contentType := "application/json"
+				if trigger.Spec.Body.ContentType != "" {
+					contentType = trigger.Spec.Body.ContentType
+				}
 				headers := map[string]string{
-					"Content-Type": trigger.Spec.Body.ContentType,
+					"Content-Type": contentType,
 				}
 				maps.Copy(headers, trigger.Spec.Headers.Static)
 				for k, v := range trigger.Spec.Headers.Template {
@@ -557,7 +558,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 
 					var renderedHeader bytes.Buffer
-					if err = renderer.Execute(&renderedHeader, unstructuredObj.Object); err != nil {
+					if err := renderer.Execute(&renderedHeader, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -662,7 +663,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				}
 
 				if retryErr != nil {
-					handleError(retryErr, logger)
+					handleError(fmt.Errorf("retry failed: %w", retryErr), logger)
+
+					return
 				}
 			}
 		}()
