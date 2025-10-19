@@ -8,9 +8,11 @@ rules:
   - ""
   resources:
   - secrets
+  - services
   verbs:
   - get
   - list
+  - watch
 - apiGroups:
   - triggers.harikube.info
   resources:

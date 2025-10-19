@@ -118,6 +118,11 @@ type Service struct {
 	// Namespace represents the namespace of service.
 	Namespace string `json:"namespace,omitempty"`
 
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:=https
+	// PortName represents the name of port. The name of the port become the protocol of the call.
+	PortName string `json:"portName,omitempty"`
+
 	// +kubebuilder:validation:Required
 	// URI Represents the URI generator strategy.
 	URI URI `json:"uri"`

@@ -82,7 +82,7 @@ type HTTPTriggerReconciler struct {
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
 
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=secrets;services,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -213,6 +213,30 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 	depFetchCtx, depFetchCancel := context.WithTimeout(r.ctx, time.Minute)
 	defer depFetchCancel()
+
+	var serviceProtocol string
+	var servicePort int32
+	if trigger.Spec.URL.Service != nil {
+		endpointService := corev1.Service{}
+		if err := r.Get(depFetchCtx, types.NamespacedName{
+			Namespace: trigger.Spec.URL.Service.Namespace,
+			Name:      trigger.Spec.URL.Service.Name,
+		}, &endpointService); err != nil {
+			return err
+		}
+
+		serviceProtocol = "https"
+		if trigger.Spec.URL.Service.PortName != "" {
+			serviceProtocol = trigger.Spec.URL.Service.PortName
+		}
+
+		servicePort = 443
+		for _, port := range endpointService.Spec.Ports {
+			if port.Name == serviceProtocol {
+				servicePort = port.Port
+			}
+		}
+	}
 
 	var userAuthPassword string
 	if trigger.Spec.Auth.BasicAuth != nil {
@@ -371,6 +395,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						continue
 					}
 
+					logger.Info("Trigger status successfully updated")
+
 					patchCancel()
 
 					break
@@ -486,9 +512,11 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						return
 					}
 
-					url = fmt.Sprintf("http://%s/%s/%s",
+					url = fmt.Sprintf("%s://%s/%s:%d/%s",
+						serviceProtocol,
 						trigger.Spec.URL.Service.Name,
 						trigger.Spec.URL.Service.Namespace,
+						servicePort,
 						strings.TrimPrefix(uri, "/"),
 					)
 				default:

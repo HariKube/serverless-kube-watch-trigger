@@ -18,8 +18,8 @@ spec:
     - jsonPath: .status.errorReason
       name: ErrorReason
       type: string
-    - jsonPath: .status.lastRevision
-      name: LastRevision
+    - jsonPath: .status.errorResourceVersion
+      name: ErrorResourceVersion
       type: string
     name: v1
     schema:
@@ -234,11 +234,11 @@ spec:
                 description: Delivery represents the delivery details.
                 properties:
                   retries:
-                    default: 0
+                    default: 1
                     description: Retries represents the retries of the request on
                       failure.
                     maximum: 100
-                    minimum: 0
+                    minimum: 1
                     type: integer
                   timeout:
                     default: '''10s'''
@@ -368,6 +368,11 @@ spec:
                         type: string
                       namespace:
                         description: Namespace represents the namespace of service.
+                        type: string
+                      portName:
+                        default: https
+                        description: PortName represents the name of port. The name
+                          of the port become the protocol of the call.
                         type: string
                       uri:
                         description: URI Represents the URI generator strategy.
