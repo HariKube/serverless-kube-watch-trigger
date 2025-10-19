@@ -107,4 +107,4 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.kubeVersion }}
       
       - name: Running Test Integration
-        run: make package test-integrtion
+        run: make package test-integration
