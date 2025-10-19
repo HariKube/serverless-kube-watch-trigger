@@ -366,7 +366,7 @@ spec:
                           almost certainly wrong.
                           More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
                         type: string
-                      static:
+                      namespace:
                         description: Namespace represents the namespace of service.
                         type: string
                       uri:
@@ -403,8 +403,11 @@ spec:
             properties:
               errorReason:
                 type: string
-              lastRevision:
+              errorResourceVersion:
                 type: string
+              lastGeneration:
+                format: int64
+                type: integer
             type: object
         type: object
     served: true

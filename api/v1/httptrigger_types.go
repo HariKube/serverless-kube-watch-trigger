@@ -32,7 +32,7 @@ type HTTPTriggerSpec struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="ErrorReason",type="string",JSONPath=".status.errorReason"
-// +kubebuilder:printcolumn:name="LastRevision",type="string",JSONPath=".status.lastRevision"
+// +kubebuilder:printcolumn:name="ErrorResourceVersion",type="string",JSONPath=".status.errorResourceVersion"
 
 // HTTPTrigger is the Schema for the HTTPtriggers API.
 type HTTPTrigger struct {

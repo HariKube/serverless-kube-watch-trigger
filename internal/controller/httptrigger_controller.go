@@ -58,10 +58,6 @@ import (
 	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
 )
 
-const (
-	LastAppliedGenerationAnnotation = "triggers.harikube.info/last-applied-generation"
-)
-
 type Watcher struct {
 	Reconciler *HTTPTriggerReconciler
 }
@@ -123,20 +119,11 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		return ctrl.Result{}, nil
-	} else if trigger.Generation == 1 {
+	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
 	} else {
-		if lag, ok := trigger.Annotations[LastAppliedGenerationAnnotation]; ok && trigger.Status.LastResourceVersion == "0" {
-			lastGeneration, err := strconv.ParseInt(lag, 10, 64)
-			if err != nil {
-				logger.Error(err, "Trigger last generation parse failed")
-
-				return ctrl.Result{}, nil
-			}
-
-			if lastGeneration+1 == trigger.Generation {
-				return ctrl.Result{}, nil
-			}
+		if trigger.Status.ErrorResourceVersion == "0" && trigger.Status.LastGeneration == trigger.Generation {
+			return ctrl.Result{}, nil
 		}
 
 		logger.Info("Trigger updated")
@@ -158,13 +145,10 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	patchedTrigger := trigger.DeepCopy()
-	if patchedTrigger.Annotations == nil {
-		patchedTrigger.Annotations = map[string]string{}
-	}
-	patchedTrigger.Annotations[LastAppliedGenerationAnnotation] = strconv.FormatInt(trigger.Generation, 10)
+	patchedTrigger.Status.LastGeneration = trigger.Generation
 	patchedTrigger.Status.ErrorReason = ""
-	patchedTrigger.Status.LastResourceVersion = "0"
-	if err := r.Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
+	patchedTrigger.Status.ErrorResourceVersion = "0"
+	if err := r.Status().Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -180,8 +164,8 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 //nolint:gocyclo
 func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
 	resourceVersion := "0"
-	if trigger.Status.LastResourceVersion != "" {
-		resourceVersion = trigger.Status.LastResourceVersion
+	if trigger.Status.ErrorResourceVersion != "" {
+		resourceVersion = trigger.Status.ErrorResourceVersion
 	}
 	lastResourceVersion := resourceVersion
 	lastResourceVersionMutex := sync.Mutex{}
@@ -378,12 +362,12 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				lastResourceVersionMutex.Lock()
 				patchedTrigger := trigger.DeepCopy()
 				patchedTrigger.Status.ErrorReason = err.Error()
-				patchedTrigger.Status.LastResourceVersion = lastResourceVersion
+				patchedTrigger.Status.ErrorResourceVersion = lastResourceVersion
 				lastResourceVersionMutex.Unlock()
 
 				for {
 					patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
-					if err := r.Patch(patchCtx, patchedTrigger, client.MergeFrom(trigger)); err != nil && !apierrors.IsNotFound(err) {
+					if err := r.Status().Patch(patchCtx, patchedTrigger, client.MergeFrom(trigger)); err != nil && !apierrors.IsNotFound(err) {
 						logger.Error(err, "Trigger status update failed")
 
 						patchCancel()
@@ -592,8 +576,12 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						req.Header.Add(k, v)
 					}
 
+					metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
+
 					resp, err := httpClient.Do(req)
 					if err != nil {
+						logger.Error(err, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
+
 						retryErr = err
 
 						reqCancel()
@@ -608,6 +596,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 							retryErr = fmt.Errorf("status code is %d", resp.StatusCode)
 						}
 
+						logger.Error(retryErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
+
 						reqCancel()
 
 						<-time.After(time.Second)
@@ -615,7 +605,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						continue
 					}
 
-					crv, err := strconv.ParseInt(unstructuredObj.Object["metadata"].(map[string]interface{})["resourceVersion"].(string), 10, 64)
+					crv, err := strconv.ParseInt(metadata["resourceVersion"].(string), 10, 64)
 					if err != nil {
 						handleError(err, logger)
 						reqCancel()
@@ -630,9 +620,11 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 						return
 					} else if lrv < crv {
-						lastResourceVersion = unstructuredObj.Object["metadata"].(map[string]interface{})["resourceVersion"].(string)
+						lastResourceVersion = metadata["resourceVersion"].(string)
 					}
 					lastResourceVersionMutex.Unlock()
+
+					logger.Info("Endpoint sucessfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
 
 					reqCancel()
 					if err := resp.Body.Close(); err != nil {

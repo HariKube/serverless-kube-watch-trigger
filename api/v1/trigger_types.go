@@ -246,6 +246,7 @@ type Delivery struct {
 
 // TriggerStatus defines the observed state of Trigger.
 type TriggerStatus struct {
-	ErrorReason         string `json:"errorReason,omitempty"`
-	LastResourceVersion string `json:"lastRevision,omitempty"`
+	ErrorReason          string `json:"errorReason,omitempty"`
+	ErrorResourceVersion string `json:"errorResourceVersion,omitempty"`
+	LastGeneration       int64  `json:"lastGeneration,omitempty"`
 }
