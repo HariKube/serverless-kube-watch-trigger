@@ -28,6 +28,7 @@ spec:
     # service:
     #   name: webhook-svc
     #   namespace: default
+    #   portName: http
     #   uri:
     #     template: "/hook/{{ .metadata.name }}"
   method: POST

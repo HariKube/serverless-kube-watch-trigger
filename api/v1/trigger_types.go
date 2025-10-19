@@ -119,8 +119,8 @@ type Service struct {
 	Namespace string `json:"namespace,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default:=https
-	// PortName represents the name of port. The name of the port become the protocol of the call.
+	// PortName represents the name of port. If missing first port of the service will be seelcted.
+	// The name defines the protocol also, if missing http is the default.
 	PortName string `json:"portName,omitempty"`
 
 	// +kubebuilder:validation:Required

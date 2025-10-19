@@ -221,16 +221,19 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 			return err
 		}
 
-		serviceProtocol = "https"
-		if trigger.Spec.URL.Service.PortName != "" {
-			serviceProtocol = trigger.Spec.URL.Service.PortName
-		}
-
-		servicePort = 443
+		servicePort = 0
+		serviceProtocol = trigger.Spec.URL.Service.PortName
 		for _, port := range endpointService.Spec.Ports {
-			if port.Name == serviceProtocol {
+			if port.Name == trigger.Spec.URL.Service.PortName {
 				servicePort = port.Port
 			}
+		}
+		if servicePort == 0 {
+			servicePort = endpointService.Spec.Ports[0].Port
+			serviceProtocol = endpointService.Spec.Ports[0].Name
+		}
+		if serviceProtocol == "" {
+			serviceProtocol = "http"
 		}
 	}
 
@@ -509,7 +512,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						return
 					}
 
-					url = fmt.Sprintf("%s://%s/%s:%d/%s",
+					url = fmt.Sprintf("%s://%s.%s:%d/%s",
 						serviceProtocol,
 						trigger.Spec.URL.Service.Name,
 						trigger.Spec.URL.Service.Namespace,
