@@ -559,7 +559,11 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 				var retryErr error
 				for i := 0; i <= int(trigger.Spec.Delivery.Retries); i++ {
-					reqCtx, reqCancel := context.WithTimeout(ctx, trigger.Spec.Delivery.Timeout.Duration)
+					timeout := trigger.Spec.Delivery.Timeout.Duration
+					if timeout == 0 {
+						timeout = 10 * time.Second
+					}
+					reqCtx, reqCancel := context.WithTimeout(ctx, timeout)
 
 					req, err := http.NewRequestWithContext(reqCtx, string(trigger.Spec.Method), url, strings.NewReader(body))
 					if err != nil {
@@ -669,6 +673,17 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 	r.ctx = ctx
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
+
+	go func() {
+		<-ctx.Done()
+
+		r.runningTriggersLock.Lock()
+		defer r.runningTriggersLock.Unlock()
+
+		for _, c := range r.runningTriggers {
+			c()
+		}
+	}()
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&triggersv1.HTTPTrigger{}).

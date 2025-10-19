@@ -237,8 +237,8 @@ type Delivery struct {
 	Timeout metav1.Duration `json:"timeout,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default:=0
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default:=1
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// Retries represents the retries of the request on failure.
 	Retries uint8 `json:"retries,omitempty"`
