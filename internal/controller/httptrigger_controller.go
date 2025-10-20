@@ -242,7 +242,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	depFetchCtx, depFetchCancel := context.WithTimeout(r.ctx, time.Minute)
 	defer depFetchCancel()
 
-	var serviceProtocol string
+	var serviceScheme string
 	var servicePort int32
 	if trigger.Spec.URL.Service != nil {
 		endpointService := corev1.Service{}
@@ -253,8 +253,12 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 			return err
 		}
 
+		serviceScheme = trigger.Spec.URL.Service.Scheme
+		if serviceScheme == "" {
+			serviceScheme = "http"
+		}
+
 		servicePort = 0
-		serviceProtocol = trigger.Spec.URL.Service.PortName
 		for _, port := range endpointService.Spec.Ports {
 			if port.Name == trigger.Spec.URL.Service.PortName {
 				servicePort = port.Port
@@ -262,10 +266,6 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		}
 		if servicePort == 0 {
 			servicePort = endpointService.Spec.Ports[0].Port
-			serviceProtocol = endpointService.Spec.Ports[0].Name
-		}
-		if serviceProtocol == "" {
-			serviceProtocol = "http"
 		}
 	}
 
@@ -538,7 +538,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 
 					url = fmt.Sprintf("%s://%s.%s:%d/%s",
-						serviceProtocol,
+						serviceScheme,
 						trigger.Spec.URL.Service.Name,
 						trigger.Spec.URL.Service.Namespace,
 						servicePort,

@@ -61,6 +61,7 @@ spec:
     #   name: webhook-svc
     #   namespace: default
     #   portName: https # Optional
+    #   scheme: https # Optional 
     #   uri:
     #     template: "/hook/{{ .metadata.name }}"
   method: POST # Optional

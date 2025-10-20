@@ -373,9 +373,13 @@ spec:
                         description: Namespace represents the namespace of service.
                         type: string
                       portName:
-                        description: |-
-                          PortName represents the name of port. If missing first port of the service will be seelcted.
-                          The name defines the protocol also, if missing http is the default.
+                        description: PortName represents the name of port. If missing
+                          first port of the service will be selected.
+                        type: string
+                      scheme:
+                        default: http
+                        description: Scheme represents the scheme protocol, http and
+                          https are supported.
                         type: string
                       uri:
                         description: URI Represents the URI generator strategy.

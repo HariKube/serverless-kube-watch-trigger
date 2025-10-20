@@ -11,8 +11,9 @@ spec:
     static: "https://example.com/hook"
     # template: "https://example.com/hook/{{ .metadata.name }}"
     # service:
-    #   name: webhook-svc
+    #   name: kubernetes
     #   namespace: default
+    #   scheme: https
     #   uri:
     #     template: "/hook/{{ .metadata.name }}"
   method: GET
