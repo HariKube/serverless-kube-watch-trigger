@@ -298,10 +298,15 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	}
 
 	httpTransport := &http.Transport{
-		MaxIdleConns:    int(trigger.Spec.Concurrency),
-		IdleConnTimeout: time.Minute,
+		MaxIdleConns:          int(trigger.Spec.Concurrency * 2),
+		MaxIdleConnsPerHost:   int(trigger.Spec.Concurrency),
+		MaxConnsPerHost:       int(trigger.Spec.Concurrency * 2),
+		IdleConnTimeout:       time.Minute,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if trigger.Spec.Auth.TLS != nil {
+		httpTransport.TLSHandshakeTimeout = 10 * time.Second
+
 		caSecret := corev1.Secret{}
 		if err := r.Get(depFetchCtx, types.NamespacedName{
 			Namespace: trigger.Namespace,
