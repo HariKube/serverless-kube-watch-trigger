@@ -69,6 +69,8 @@ jobs:
             - `--label-selectors`: The label selectors the operator reacts on trigger events.
             - `--field-selectors`: The field selectors the operator reacts on trigger events.
 
+            > Requires `WatchList` feature gate enabled.
+
             ## Installation
             `kubectl apply -f https://github.com/HariKube/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle.yaml`
 

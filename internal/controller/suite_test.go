@@ -68,6 +68,11 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
+		ControlPlane: envtest.ControlPlane{
+			APIServer: &envtest.APIServer{
+				Args: []string{"--feature-gates=WatchList=true"},
+			},
+		},
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
