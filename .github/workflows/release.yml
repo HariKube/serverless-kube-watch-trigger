@@ -62,6 +62,11 @@ jobs:
             # serverless-kube-watch-trigger
             A lightweight Kubernetes operator that turns **Kubernetes API server watch events into trigger sources** for serverless functions and external systems. It allows you to declaratively define *when* and *how* functions or webhooks should fire in response to changes in Kubernetes resources — without modifying the API server or deploying heavy eventing frameworks.
 
+            ## Configuration
+            For apply any configuration option please edit the Kubernetes manifests below and add extra arguments there.
+
+            - `--namespace`: The namespace the operator reacts on trigger events. Default is all namespaces.
+
             ## Installation
             `kubectl apply -f https://github.com/HariKube/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle.yaml`
 
