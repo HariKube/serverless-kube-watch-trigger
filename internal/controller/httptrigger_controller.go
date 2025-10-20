@@ -721,19 +721,31 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, wg *sync.WaitGroup) error {
 	r.ctx = ctx
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		<-ctx.Done()
 
 		r.runningTriggersLock.Lock()
-		defer r.runningTriggersLock.Unlock()
-
 		for _, c := range r.runningTriggers {
 			c()
+		}
+		r.runningTriggersLock.Unlock()
+
+		for {
+			r.runningTriggersLock.Lock()
+			running := len(r.runningTriggers)
+			r.runningTriggersLock.Unlock()
+
+			if running == 0 {
+				break
+			}
 		}
 	}()
 

@@ -17,10 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
 	"path/filepath"
+	"sync"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -223,13 +225,21 @@ func main() {
 	}
 
 	ctx := ctrl.SetupSignalHandler()
+	wg := sync.WaitGroup{}
+	managerCtx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		<-ctx.Done()
+		wg.Wait()
+		cancel()
+	}()
 
 	httpReconciler := &controller.HTTPTriggerReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
 	}
-	if err := httpReconciler.SetupWithManager(ctx, mgr); err != nil {
+	if err := httpReconciler.SetupWithManager(ctx, mgr, &wg); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
 		os.Exit(1)
 	}
@@ -265,7 +275,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(managerCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
