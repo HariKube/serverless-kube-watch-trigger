@@ -59,6 +59,8 @@ import (
 	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
 )
 
+var ErrInvalidTriggerContent = errors.New("invalid trigger content")
+
 type Watcher struct {
 	Reconciler *HTTPTriggerReconciler
 }
@@ -134,17 +136,23 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.createTrigger(req.String(), &trigger); err != nil {
-		logger.Error(err, "Trigger initialization failed")
-
-		return ctrl.Result{}, err
-	}
-
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
 	patchedTrigger.Status.ErrorTime = metav1.Time{}
-	patchedTrigger.Status.ErrorReason = ""
-	patchedTrigger.Status.ErrorResourceVersion = "0"
+
+	if err := r.createTrigger(req.String(), &trigger); err != nil {
+		if !errors.Is(err, ErrInvalidTriggerContent) {
+			logger.Error(err, "Trigger initialization failed")
+
+			return ctrl.Result{}, err
+		}
+
+		patchedTrigger.Status.ErrorReason = err.Error()
+	} else {
+		patchedTrigger.Status.ErrorReason = ""
+		patchedTrigger.Status.ErrorResourceVersion = "0"
+	}
+
 	if err := r.Status().Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -198,35 +206,35 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	if trigger.Spec.EventFilter != "" {
 		renderer, err := template.New("filter_template").Parse(fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter))
 		if err != nil {
-			return fmt.Errorf("failed to parse filter: %w", err)
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse filter template"))
 		}
 		compiedTemapltes["filter_template"] = renderer
 	}
 	if trigger.Spec.URL.Template != nil {
 		renderer, err := template.New("url_template").Parse(*trigger.Spec.URL.Template)
 		if err != nil {
-			return fmt.Errorf("failed to parse url: %w", err)
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse url template"))
 		}
 		compiedTemapltes["url_template"] = renderer
 	}
 	if trigger.Spec.URL.Service != nil && trigger.Spec.URL.Service.URI.Template != nil {
 		renderer, err := template.New("uri_template").Parse(*trigger.Spec.URL.Service.URI.Template)
 		if err != nil {
-			return fmt.Errorf("failed to parse uri: %w", err)
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse uri template"))
 		}
 		compiedTemapltes["uri_template"] = renderer
 	}
 	if trigger.Spec.Body.Template != "" {
 		renderer, err := template.New("body_template").Parse(trigger.Spec.Body.Template)
 		if err != nil {
-			return fmt.Errorf("failed to parse body: %w", err)
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
 		}
 		compiedTemapltes["body_template"] = renderer
 	}
 	for k, v := range trigger.Spec.Headers.Template {
 		renderer, err := template.New("header_template_" + k).Parse(v)
 		if err != nil {
-			return fmt.Errorf("failed to parse header %s: %w", k, err)
+			return errors.Join(err, ErrInvalidTriggerContent, fmt.Errorf("failed to parse header template: %s", k))
 		}
 		compiedTemapltes["header_template_"+k] = renderer
 	}
