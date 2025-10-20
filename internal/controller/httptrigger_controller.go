@@ -165,19 +165,6 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		resourceVersion = trigger.Status.ErrorResourceVersion
 	}
 
-	listOpts := metav1.ListOptions{
-		ResourceVersion:     resourceVersion,
-		TimeoutSeconds:      ptr.To(int64(60)),
-		Watch:               true,
-		AllowWatchBookmarks: false,
-		LabelSelector:       strings.Join(trigger.Spec.LabelSelector, ","),
-		FieldSelector:       strings.Join(trigger.Spec.FieldSelector, ","),
-	}
-	if trigger.Spec.SendInitialEvents {
-		listOpts.SendInitialEvents = ptr.To(true)
-		listOpts.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
-	}
-
 	apiParts := strings.Split(trigger.Spec.Resource.APIVersion, "/")
 	if len(apiParts) == 1 {
 		apiParts = append(apiParts, apiParts[0])
@@ -205,6 +192,43 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	eventTypes := map[string]bool{}
 	for _, eventType := range triggerEventTypes {
 		eventTypes[string(eventType)] = true
+	}
+
+	compiedTemapltes := map[string]*template.Template{}
+	if trigger.Spec.EventFilter != "" {
+		renderer, err := template.New("filter_template").Parse(fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter))
+		if err != nil {
+			return fmt.Errorf("failed to parse filter: %w", err)
+		}
+		compiedTemapltes["filter_template"] = renderer
+	}
+	if trigger.Spec.URL.Template != nil {
+		renderer, err := template.New("url_template").Parse(*trigger.Spec.URL.Template)
+		if err != nil {
+			return fmt.Errorf("failed to parse url: %w", err)
+		}
+		compiedTemapltes["url_template"] = renderer
+	}
+	if trigger.Spec.URL.Service != nil && trigger.Spec.URL.Service.URI.Template != nil {
+		renderer, err := template.New("uri_template").Parse(*trigger.Spec.URL.Service.URI.Template)
+		if err != nil {
+			return fmt.Errorf("failed to parse uri: %w", err)
+		}
+		compiedTemapltes["uri_template"] = renderer
+	}
+	if trigger.Spec.Body.Template != "" {
+		renderer, err := template.New("body_template").Parse(trigger.Spec.Body.Template)
+		if err != nil {
+			return fmt.Errorf("failed to parse body: %w", err)
+		}
+		compiedTemapltes["body_template"] = renderer
+	}
+	for k, v := range trigger.Spec.Headers.Template {
+		renderer, err := template.New("header_template_" + k).Parse(v)
+		if err != nil {
+			return fmt.Errorf("failed to parse header %s: %w", k, err)
+		}
+		compiedTemapltes["header_template_"+k] = renderer
 	}
 
 	depFetchCtx, depFetchCancel := context.WithTimeout(r.ctx, time.Minute)
@@ -339,6 +363,19 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	ctx, cancel := context.WithCancel(r.ctx)
 	r.runningTriggers[triggerRefName] = cancel
 
+	listOpts := metav1.ListOptions{
+		ResourceVersion:     resourceVersion,
+		TimeoutSeconds:      ptr.To(int64(60)),
+		Watch:               true,
+		AllowWatchBookmarks: false,
+		LabelSelector:       strings.Join(trigger.Spec.LabelSelector, ","),
+		FieldSelector:       strings.Join(trigger.Spec.FieldSelector, ","),
+	}
+	if trigger.Spec.SendInitialEvents {
+		listOpts.SendInitialEvents = ptr.To(true)
+		listOpts.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
+	}
+
 	watchers := []watch.Interface{}
 	for _, watchClient := range watchClients {
 		watcher, err := watchClient.Watch(ctx, listOpts)
@@ -448,15 +485,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				}
 
 				if trigger.Spec.EventFilter != "" {
-					renderer, err := template.New("filter_template").Parse(fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter))
-					if err != nil {
-						handleError(err, logger)
-
-						return
-					}
-
 					var renderedMatch bytes.Buffer
-					if err = renderer.Execute(&renderedMatch, unstructuredObj.Object); err != nil {
+					if err := compiedTemapltes["filter_template"].Execute(&renderedMatch, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -471,15 +501,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				case trigger.Spec.URL.Static != nil:
 					url = *trigger.Spec.URL.Static
 				case trigger.Spec.URL.Template != nil:
-					renderer, err := template.New("url_template").Parse(*trigger.Spec.URL.Template)
-					if err != nil {
-						handleError(err, logger)
-
-						return
-					}
-
 					var renderedURL bytes.Buffer
-					if err := renderer.Execute(&renderedURL, unstructuredObj.Object); err != nil {
+					if err := compiedTemapltes["url_template"].Execute(&renderedURL, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -491,15 +514,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					case trigger.Spec.URL.Service.URI.Static != nil:
 						uri = *trigger.Spec.URL.Service.URI.Static
 					case trigger.Spec.URL.Service.URI.Template != nil:
-						renderer, err := template.New("uri_template").Parse(*trigger.Spec.URL.Service.URI.Template)
-						if err != nil {
-							handleError(err, logger)
-
-							return
-						}
-
 						var renderedURI bytes.Buffer
-						if err := renderer.Execute(&renderedURI, unstructuredObj.Object); err != nil {
+						if err := compiedTemapltes["uri_template"].Execute(&renderedURI, unstructuredObj.Object); err != nil {
 							handleError(err, logger)
 
 							return
@@ -526,15 +542,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 				body := ""
 				if trigger.Spec.Body.Template != "" {
-					renderer, err := template.New("body_template_").Parse(trigger.Spec.Body.Template)
-					if err != nil {
-						handleError(err, logger)
-
-						return
-					}
-
 					var renderedBody bytes.Buffer
-					if err := renderer.Execute(&renderedBody, unstructuredObj.Object); err != nil {
+					if err := compiedTemapltes["body_template"].Execute(&renderedBody, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -550,16 +559,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					"Content-Type": contentType,
 				}
 				maps.Copy(headers, trigger.Spec.Headers.Static)
-				for k, v := range trigger.Spec.Headers.Template {
-					renderer, err := template.New("header_template_" + k).Parse(v)
-					if err != nil {
-						handleError(err, logger)
-
-						return
-					}
-
+				for k := range trigger.Spec.Headers.Template {
 					var renderedHeader bytes.Buffer
-					if err := renderer.Execute(&renderedHeader, unstructuredObj.Object); err != nil {
+					if err := compiedTemapltes["header_template_"+k].Execute(&renderedHeader, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
@@ -634,6 +636,11 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						logger.Error(retryErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
 
 						reqCancel()
+						if err := resp.Body.Close(); err != nil {
+							handleError(err, logger)
+
+							return
+						}
 
 						<-time.After(time.Second)
 
