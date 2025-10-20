@@ -418,14 +418,12 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	for i := 1; i <= int(trigger.Spec.Concurrency); i++ {
 		go func() {
 			for {
-				chosen, data, ok := reflect.Select(cases)
+				_, data, ok := reflect.Select(cases)
 				if !ok {
 					handleError(fmt.Errorf("closed channel"), logger)
 
 					return
 				}
-
-				cases[chosen].Chan = reflect.Value{}
 
 				eventVal := data.Interface()
 				event := eventVal.(watch.Event)
