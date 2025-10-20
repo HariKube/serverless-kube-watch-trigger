@@ -377,16 +377,14 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	r.runningTriggers[triggerRefName] = cancel
 
 	listOpts := metav1.ListOptions{
-		ResourceVersion:     resourceVersion,
-		TimeoutSeconds:      ptr.To(int64(60)),
-		Watch:               true,
-		AllowWatchBookmarks: false,
-		LabelSelector:       strings.Join(trigger.Spec.LabelSelector, ","),
-		FieldSelector:       strings.Join(trigger.Spec.FieldSelector, ","),
-	}
-	if trigger.Spec.SendInitialEvents {
-		listOpts.SendInitialEvents = ptr.To(true)
-		listOpts.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
+		ResourceVersion:      resourceVersion,
+		TimeoutSeconds:       ptr.To(int64(60)),
+		Watch:                true,
+		AllowWatchBookmarks:  false,
+		SendInitialEvents:    ptr.To(trigger.Spec.SendInitialEvents),
+		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
+		LabelSelector:        strings.Join(trigger.Spec.LabelSelector, ","),
+		FieldSelector:        strings.Join(trigger.Spec.FieldSelector, ","),
 	}
 
 	watchers := []watch.Interface{}
