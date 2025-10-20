@@ -30,6 +30,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -62,6 +64,8 @@ func init() {
 // nolint:gocyclo
 func main() {
 	var namespace string
+	var labelSelectors string
+	var fieldSelectors string
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -71,6 +75,8 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&namespace, "namespace", "", "The namespace the operator reacts on trigger events.")
+	flag.StringVar(&labelSelectors, "label-selectors", "", "The label selectors the operator reacts on trigger events.")
+	flag.StringVar(&fieldSelectors, "field-selectors", "", "The field selectors the operator reacts on trigger events.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -203,13 +209,28 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
+		Cache: cache.Options{},
 	}
 	if namespace != "" {
-		options.Cache = cache.Options{
-			DefaultNamespaces: map[string]cache.Config{
-				namespace: {}, // An empty struct {} is fine for default config
-			},
+		options.Cache.DefaultNamespaces = map[string]cache.Config{
+			namespace: {},
 		}
+	}
+	if labelSelectors != "" {
+		selector, err := labels.Parse(labelSelectors)
+		if err != nil {
+			setupLog.Error(err, "unable to parse label selectors")
+			os.Exit(1)
+		}
+		options.Cache.DefaultLabelSelector = selector
+	}
+	if fieldSelectors != "" {
+		selector, err := fields.ParseSelector(fieldSelectors)
+		if err != nil {
+			setupLog.Error(err, "unable to parse field selectors")
+			os.Exit(1)
+		}
+		options.Cache.DefaultFieldSelector = selector
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), options)

@@ -66,6 +66,8 @@ jobs:
             For apply any configuration option please edit the Kubernetes manifests below and add extra arguments there.
 
             - `--namespace`: The namespace the operator reacts on trigger events. Default is all namespaces.
+            - `--label-selectors`: The label selectors the operator reacts on trigger events.
+            - `--field-selectors`: The field selectors the operator reacts on trigger events.
 
             ## Installation
             `kubectl apply -f https://github.com/HariKube/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle.yaml`
