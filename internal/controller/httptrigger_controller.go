@@ -719,7 +719,7 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, wg *sync.WaitGroup) error {
+func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, maxConcurrentReconciles int, wg *sync.WaitGroup) error {
 	r.ctx = ctx
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
@@ -752,7 +752,7 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 		Named("httptrigger").
 		WithOptions(controller.Options{
 			NeedLeaderElection:      ptr.To(true),
-			MaxConcurrentReconciles: 1,
+			MaxConcurrentReconciles: maxConcurrentReconciles,
 			RecoverPanic:            ptr.To(true),
 			Logger:                  mgr.GetLogger(),
 		}).
