@@ -68,6 +68,7 @@ jobs:
             - `--namespace`: The namespace the operator reacts on trigger events. Default is all namespaces.
             - `--label-selectors`: The label selectors the operator reacts on trigger events.
             - `--field-selectors`: The field selectors the operator reacts on trigger events.
+            - `--max-concurrent-reconciles`: The maximum number of concurrent Reconciles which can be run. Default: 1.
 
             > Requires `WatchList` feature gate enabled.
 
