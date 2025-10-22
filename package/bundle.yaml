@@ -658,7 +658,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: mhmxs/serverless-kube-watch-trigger:snapshot-dirty
+        image: mhmxs/serverless-kube-watch-trigger:snapshot-7
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

@@ -8,7 +8,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
   url:
-    static: "https://example.com/hook"
+    # static: "https://example.com/hook"
+    static: "http://192.168.3.104:8000"
     # template: "https://example.com/hook/{{ .metadata.name }}"
     # service:
     #   name: kubernetes
