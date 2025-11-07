@@ -8,9 +8,15 @@ on:
     - beta-v**
     - alpha-v**
     - dev-v**
+    paths-ignore:
+    - "**.md"
+    - "**.yaml"
 
   pull_request:
     branches: [main]
+    paths-ignore:
+    - "**.md"
+    - "**.yaml"
 
 concurrency: 
   group: ${{ github.ref_name }}-test
