@@ -70,6 +70,17 @@ jobs:
             - `--field-selectors`: The field selectors the operator reacts on trigger events.
             - `--max-concurrent-reconciles`: The maximum number of concurrent Reconciles which can be run. Default: 1.
 
+            ## Kubernetes Client Configuration
+            If --kubeconfig, or KUBECONFIG is set, will use the kubeconfig file at that location.  Otherwise will assume running
+            in cluster and use the cluster provided kubeconfig.
+
+            Config precedence:
+
+            * --kubeconfig flag pointing at a file
+            * KUBECONFIG environment variable pointing at a file
+            * In-cluster config if running in cluster
+            * $HOME/.kube/config if exists.
+
             > Requires `WatchList` feature gate enabled.
 
             ## Installation
