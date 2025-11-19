@@ -28,7 +28,7 @@ Each trigger consists of:
 ### 🧱 Example
 
 ```yaml
-apiVersion: triggers.example.com/v1
+apiVersion: triggers.harikube.info/v1
 kind: HTTPTrigger
 metadata:
   name: full-httptrigger-example
