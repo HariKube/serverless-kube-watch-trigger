@@ -225,7 +225,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		compiedTemapltes["uri_template"] = renderer
 	}
 	if trigger.Spec.Body.Template != "" {
-		renderer, err := template.New("body_template").Parse(trigger.Spec.Body.Template)
+		renderer, err := template.New("body_template").Funcs(template.FuncMap{
+			"toJson": toJson,
+		}).Parse(trigger.Spec.Body.Template)
 		if err != nil {
 			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
 		}
