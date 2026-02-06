@@ -89,5 +89,5 @@ jobs:
             ## Release Notes
         draft: true
         prerelease: ${{ startsWith(github.ref, 'refs/heads/rc-') || startsWith(github.ref, 'refs/heads/beta-') || startsWith(github.ref, 'refs/heads/alpha-') }}
-        files: package/bundle.yaml
+        files: package/bundle.yaml,package/bundle-rbac.yaml
   

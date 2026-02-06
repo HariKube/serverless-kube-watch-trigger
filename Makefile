@@ -260,6 +260,8 @@ package: kustomize manifests generate
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 
 	$(KUSTOMIZE) build config/default >> package/bundle.yaml
+
+	$(KUSTOMIZE) build config/rbac >> package/bundle-rbac.yaml
 	
 KUBE_BUILDER_VERSION?=v4.6.0
 KIND_VERSION?=v0.30.0

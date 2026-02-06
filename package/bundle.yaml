@@ -381,9 +381,13 @@ spec:
                         description: Namespace represents the namespace of service.
                         type: string
                       portName:
-                        description: |-
-                          PortName represents the name of port. If missing first port of the service will be seelcted.
-                          The name defines the protocol also, if missing http is the default.
+                        description: PortName represents the name of port. If missing
+                          first port of the service will be selected.
+                        type: string
+                      scheme:
+                        default: http
+                        description: Scheme represents the scheme protocol, http and
+                          https are supported.
                         type: string
                       uri:
                         description: URI Represents the URI generator strategy.
@@ -440,7 +444,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-controller-manager
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-controller-manager
   namespace: serverless-kube-watch-trigger-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -449,7 +453,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-leader-election-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-leader-election-role
   namespace: serverless-kube-watch-trigger-system
 rules:
 - apiGroups:
@@ -490,7 +494,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-httptrigger-admin-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-httptrigger-admin-role
 rules:
 - apiGroups:
   - triggers.harikube.info
@@ -511,7 +515,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-httptrigger-editor-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-httptrigger-editor-role
 rules:
 - apiGroups:
   - triggers.harikube.info
@@ -538,7 +542,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-httptrigger-viewer-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-httptrigger-viewer-role
 rules:
 - apiGroups:
   - triggers.harikube.info
@@ -558,7 +562,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: serverless-kube-watch-trigger-manager-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-manager-role
 rules:
 - apiGroups:
   - ""
@@ -602,15 +606,15 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-leader-election-rolebinding
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-leader-election-rolebinding
   namespace: serverless-kube-watch-trigger-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: serverless-kube-watch-trigger-leader-election-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-leader-election-role
 subjects:
 - kind: ServiceAccount
-  name: serverless-kube-watch-trigger-controller-manager
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-controller-manager
   namespace: serverless-kube-watch-trigger-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -619,14 +623,14 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: serverless-kube-watch-trigger
-  name: serverless-kube-watch-trigger-manager-rolebinding
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-manager-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: serverless-kube-watch-trigger-manager-role
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-manager-role
 subjects:
 - kind: ServiceAccount
-  name: serverless-kube-watch-trigger-controller-manager
+  name: serverless-kube-watch-trigger-serverless-kube-watch-trigger-controller-manager
   namespace: serverless-kube-watch-trigger-system
 ---
 apiVersion: apps/v1
@@ -658,7 +662,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: mhmxs/serverless-kube-watch-trigger:snapshot-7
+        image: mhmxs/serverless-kube-watch-trigger:beta-v1.0.0-7-dirty
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -691,6 +695,6 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      serviceAccountName: serverless-kube-watch-trigger-controller-manager
+      serviceAccountName: serverless-kube-watch-trigger-serverless-kube-watch-trigger-controller-manager
       terminationGracePeriodSeconds: 10
       volumes: []

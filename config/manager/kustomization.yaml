@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: mhmxs/serverless-kube-watch-trigger
-  newTag: snapshot-7
+  newTag: beta-v1.0.0-7-dirty

@@ -1,0 +1,194 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-leader-election-role
+  namespace: serverless-kube-watch-trigger-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-admin-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - '*'
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-editor-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-httptrigger-viewer-role
+rules:
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serverless-kube-watch-trigger-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - triggers.harikube.info
+  resources:
+  - httptriggers/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-leader-election-rolebinding
+  namespace: serverless-kube-watch-trigger-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: serverless-kube-watch-trigger-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+  name: serverless-kube-watch-trigger-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: serverless-kube-watch-trigger-manager-role
+subjects:
+- kind: ServiceAccount
+  name: serverless-kube-watch-trigger-controller-manager
+  namespace: serverless-kube-watch-trigger-system
