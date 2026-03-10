@@ -46,7 +46,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
+	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 )
 
 var _ = Describe("HTTPTrigger Controller", func() {

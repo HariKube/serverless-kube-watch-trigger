@@ -56,7 +56,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
+	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 )
 
 var ErrInvalidTriggerContent = errors.New("invalid trigger content")

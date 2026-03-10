@@ -33,7 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
+	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 	// +kubebuilder:scaffold:imports
 )
 

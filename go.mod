@@ -1,4 +1,4 @@
-module github.com/mhmxs/serverless-kube-watch-trigger
+module github.com/harikube/serverless-kube-watch-trigger
 
 go 1.24.0
 

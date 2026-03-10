@@ -7,7 +7,7 @@ domain: harikube.info
 layout:
 - go.kubebuilder.io/v4
 projectName: serverless-kube-watch-trigger
-repo: github.com/mhmxs/serverless-kube-watch-trigger
+repo: github.com/harikube/serverless-kube-watch-trigger
 resources:
 - api:
     crdVersion: v1
@@ -16,6 +16,6 @@ resources:
   domain: harikube.info
   group: triggers
   kind: HTTPTrigger
-  path: github.com/mhmxs/serverless-kube-watch-trigger/api/v1
+  path: github.com/harikube/serverless-kube-watch-trigger/api/v1
   version: v1
 version: "3"

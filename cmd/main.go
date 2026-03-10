@@ -44,8 +44,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	triggersv1 "github.com/mhmxs/serverless-kube-watch-trigger/api/v1"
-	"github.com/mhmxs/serverless-kube-watch-trigger/internal/controller"
+	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
+	"github.com/harikube/serverless-kube-watch-trigger/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
 
