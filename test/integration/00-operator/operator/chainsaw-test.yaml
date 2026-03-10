@@ -12,13 +12,10 @@ spec:
     try:
     - script:
         content: make -C ../../../.. package docker-build docker-load
-        env:
-        - name: IMG
-          value: mhmxs/serverless-kube-watch-trigger:snapshot
   - name: Deploy operator
     try:
-    - apply:
-        file: ../../../../package/bundle.yaml
+    - script:
+        content: kubectl apply -f ../../../../package/bundle-${TAG}.yaml
     - assert:
         resource:
           apiVersion: apps/v1

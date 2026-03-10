@@ -1,6 +1,6 @@
 # Image URL to use all building/pushing image targets
 TAG ?= $(shell git describe --tags --abbrev=0)
-IMG ?= mhmxs/serverless-kube-watch-trigger:$(TAG)
+IMG ?= harikube/serverless-kube-watch-trigger:$(TAG)
 
 DIFF = $(shell git rev-list refs/tags/$(TAG)..HEAD --count)
 ifneq ($(DIFF), 0)
@@ -52,11 +52,11 @@ help: ## Display this help.
 ##@ Development
 
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests:## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate:## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 .PHONY: fmt
@@ -85,10 +85,10 @@ setup-test-integration: cleanup-test-integration ## Set up a Kind cluster for in
 	$(KUBECTL) wait --for=condition=Ready node/$(KIND_CLUSTER)-control-plane --timeout=120s
 
 .PHONY: test-integration
-test-integration: chainsaw setup-test-integration _test-integration
+test-integration: setup-test-integration _test-integration
 
 _test-integration:
-	$(CHAINSAW) test --test-dir test/integration/00-operator
+	TAG=$(TAG) $(CHAINSAW) test --test-dir test/integration/00-operator
 	$(CHAINSAW) test --test-dir test/integration/01-http-trigger
 	$(MAKE) cleanup-test-integration
 
@@ -97,15 +97,15 @@ cleanup-test-integration: ## Tear down the Kind cluster used for integration tes
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint:## Runlinter
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+lint-fix:## Runlinter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
 .PHONY: lint-config
-lint-config: golangci-lint ## Verify golangci-lint linter configuration
+lint-config:## Verifylinter configuration
 	$(GOLANGCI_LINT) config verify
 
 ##@ Build
@@ -151,7 +151,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
@@ -163,20 +163,20 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+install: manifests ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
 
 .PHONY: uninstall
-uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+uninstall: manifests ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy: manifests ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 ##@ Dependencies
@@ -185,40 +185,22 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
+DEVBOXBIN ?=  $(shell pwd)/.devbox/nix/profile/default/bin
 
 ## Tool Binaries
-KUBECTL ?= $(LOCALBIN)/kubectl
-KIND ?= $(LOCALBIN)/kind
-KUSTOMIZE ?= $(LOCALBIN)/kustomize
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-CHAINSAW ?= $(LOCALBIN)/chainsaw
+KUBECTL ?= $(DEVBOXBIN)/kubectl
+KIND ?= $(DEVBOXBIN)/kind
+KUSTOMIZE ?= $(DEVBOXBIN)/kustomize
+CONTROLLER_GEN ?= $(DEVBOXBIN)/controller-gen
+CHAINSAW ?= $(DEVBOXBIN)/chainsaw
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT = $(DEVBOXBIN)/golangci-lint
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v5.6.0
-CONTROLLER_TOOLS_VERSION ?= v0.18.0
-CHAINSAW_VERSION ?= v0.2.12
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v2.1.0
-
-.PHONY: kustomize
-kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
-$(KUSTOMIZE): $(LOCALBIN)
-	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
-
-.PHONY: controller-gen
-controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
-$(CONTROLLER_GEN): $(LOCALBIN)
-	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
-
-.PHONY: chainsaw
-chainsaw: $(CHAINSAW) ## Download chainsaw locally if necessary.
-$(CHAINSAW): $(LOCALBIN)
-	$(call go-install-tool,$(CHAINSAW),github.com/kyverno/chainsaw,$(CHAINSAW_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.
@@ -232,11 +214,6 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
 $(ENVTEST): $(LOCALBIN)
 	$(call go-install-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest,$(ENVTEST_VERSION))
-
-.PHONY: golangci-lint
-golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
@@ -254,28 +231,14 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $(1)-$(3) $(1)
 endef
 
-package: kustomize manifests generate
-	rm -rf package ; mkdir package
+package: manifests generate
+	mkdir -p package
 
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 
-	$(KUSTOMIZE) build config/default >> package/bundle.yaml
+	rm -f package/bundle-$(TAG).yaml ; $(KUSTOMIZE) build config/default >> package/bundle-$(TAG).yaml
 
-	$(KUSTOMIZE) build config/rbac >> package/bundle-rbac.yaml
+	sed -i 's/# namePrefix/namePrefix/' config/rbac/kustomization.yaml
+	rm -f package/bundle-rbac-$(TAG).yaml ; $(KUSTOMIZE) build config/rbac >> package/bundle-rbac-$(TAG).yaml
+	sed -i 's/namePrefix/# namePrefix/' config/rbac/kustomization.yaml
 	
-KUBE_BUILDER_VERSION?=v4.6.0
-KIND_VERSION?=v0.30.0
-KUBE_VERSION?=v1.34.0
-
-deps: $(LOCALBIN) kustomize controller-gen envtest golangci-lint
-	rm -f $(LOCALBIN)/kubebuilder
-	curl -L https://github.com/kubernetes-sigs/kubebuilder/releases/download/$(KUBE_BUILDER_VERSION)/kubebuilder_linux_amd64 -o $(LOCALBIN)/kubebuilder
-	chmod +x $(LOCALBIN)/kubebuilder
-
-	rm -f $(LOCALBIN)/kind
-	curl -Lo $(LOCALBIN)/kind https://kind.sigs.k8s.io/dl/$(KIND_VERSION)/kind-linux-amd64
-	chmod +x $(LOCALBIN)/kind
-
-	rm -f $(LOCALBIN)/kubectl
-	curl -Lo $(LOCALBIN)/kubectl https://dl.k8s.io/release/$(KUBE_VERSION)/bin/linux/amd64/kubectl
-	chmod +x $(LOCALBIN)/kubectl

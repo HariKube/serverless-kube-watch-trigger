@@ -53,6 +53,7 @@ jobs:
       run: make package
       env:
         IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
+        TAG: ${{ steps.extract_branch.outputs.branch }}
     - name: Create release
       if: ${{ !startsWith(github.ref, 'refs/heads/dev-') }}
       uses: mhmxs/milestone-release-action@main
@@ -84,10 +85,10 @@ jobs:
             > Requires `WatchList` feature gate enabled.
 
             ## Installation
-            `kubectl apply -f https://github.com/HariKube/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle.yaml`
+            `kubectl apply -f https://github.com/HariKube/serverless-kube-watch-trigger/releases/download/${{ steps.extract_branch.outputs.branch }}/bundle-${{ steps.extract_branch.outputs.branch }}.yaml`
 
             ## Release Notes
         draft: true
         prerelease: ${{ startsWith(github.ref, 'refs/heads/rc-') || startsWith(github.ref, 'refs/heads/beta-') || startsWith(github.ref, 'refs/heads/alpha-') }}
-        files: package/bundle.yaml,package/bundle-rbac.yaml
+        files: package/bundle-${{ steps.extract_branch.outputs.branch }}.yaml,package/bundle-rbac-${{ steps.extract_branch.outputs.branch }}.yaml
   

@@ -19,6 +19,10 @@ go.work
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
 
+# env file
+.env
+.devbox/
+
 # editor and IDE paraphernalia
 __debug_bin*
 .idea
@@ -26,3 +30,5 @@ __debug_bin*
 *.swp
 *.swo
 *~
+
+package/

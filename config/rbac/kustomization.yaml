@@ -6,7 +6,7 @@ namespace: serverless-kube-watch-trigger-system
 # "wordpress" becomes "alices-wordpress".
 # Note that it should also match with the prefix (text before '-') of the namespace
 # field above.
-namePrefix: serverless-kube-watch-trigger-
+# namePrefix: serverless-kube-watch-trigger-
 
 resources:
 # All RBAC will be applied under this service account in
