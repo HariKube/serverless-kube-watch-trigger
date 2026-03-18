@@ -41,19 +41,21 @@ jobs:
         registry: ${{ vars.REGISTRY }}
         username: ${{ vars.REGISTRY_USER }}
         password: ${{ secrets.REGISTRY_TOKEN }}
-    - name: Build image
-      run: make docker-build
-      env:
-        IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
-    - name: Push image
-      run: make docker-push
-      env:
-        IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
     - name: Generate bundle
       run: make package
       env:
         IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
         TAG: ${{ steps.extract_branch.outputs.branch }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Build and push (forks)
+      uses: docker/build-push-action@v6
+      with:
+        platforms: linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+        context: .
+        push: true
+        tags: |
+          ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
     - name: Create release
       if: ${{ !startsWith(github.ref, 'refs/heads/dev-') }}
       uses: mhmxs/milestone-release-action@main
