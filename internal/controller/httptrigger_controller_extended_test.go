@@ -67,25 +67,25 @@ func newReconciler() *HTTPTriggerReconciler {
 }
 
 // cleanupTrigger deletes a named HTTPTrigger silently.
-func cleanupTrigger(ctx context.Context, name, namespace string) {
+func cleanupTrigger(ctx context.Context, name string) {
 	trigger := &triggersv1.HTTPTrigger{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, trigger); err == nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, trigger); err == nil {
 		_ = k8sClient.Delete(ctx, trigger)
 	}
 }
 
 // cleanupSecret deletes a named Secret silently.
-func cleanupSecret(ctx context.Context, name, namespace string) {
+func cleanupSecret(ctx context.Context, name string) {
 	secret := &corev1.Secret{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, secret); err == nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, secret); err == nil {
 		_ = k8sClient.Delete(ctx, secret)
 	}
 }
 
 // cleanupService deletes a named Service silently.
-func cleanupService(ctx context.Context, name, namespace string) {
+func cleanupService(ctx context.Context, name string) {
 	svc := &corev1.Service{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, svc); err == nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, svc); err == nil {
 		_ = k8sClient.Delete(ctx, svc)
 	}
 }
@@ -137,7 +137,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 
 		AfterEach(func() {
 			srv.Close()
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("skips creating a new watcher when generation matches and no error", func() {
@@ -200,7 +200,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 
 		AfterEach(func() {
 			srv.Close()
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("cancels the existing watcher before starting a new one", func() {
@@ -249,7 +249,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-invalid"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("records ErrorReason in status for a bad URL template", func() {
@@ -311,7 +311,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 
 		AfterEach(func() {
 			srv.Close()
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("cancels the watcher when the trigger is deleted", func() {
@@ -363,7 +363,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-static-url"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("calls the static URL when a watched resource is added", func() {
@@ -419,8 +419,8 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		)
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
-			cleanupService(bgCtx, svcName, ns)
+			cleanupTrigger(bgCtx, name)
+			cleanupService(bgCtx, svcName)
 		})
 
 		It("builds a service URL with a static URI and starts the watcher", func() {
@@ -483,8 +483,8 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		)
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
-			cleanupService(bgCtx, svcNameTpl, ns)
+			cleanupTrigger(bgCtx, name)
+			cleanupService(bgCtx, svcNameTpl)
 		})
 
 		It("resolves a named port and builds a URL from URI template", func() {
@@ -545,7 +545,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-modified"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("dispatches HTTP call on MODIFIED event", func() {
@@ -613,7 +613,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-deleted-event"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("dispatches HTTP call on DELETED event", func() {
@@ -672,7 +672,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-default-events"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("fires for ADDED when EventType is empty (defaults to all)", func() {
@@ -725,7 +725,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-filter-reject"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("does not dispatch when the filter does not match", func() {
@@ -783,8 +783,8 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		)
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
-			cleanupSecret(bgCtx, secretName, ns)
+			cleanupTrigger(bgCtx, name)
+			cleanupSecret(bgCtx, secretName)
 		})
 
 		It("sends the correct SHA512 HMAC signature header", func() {
@@ -880,7 +880,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const ns2 = "kube-public"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("starts a watcher per namespace and receives events from all of them", func() {
@@ -941,7 +941,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-retry-exhausted"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("records ErrorReason in status after all retries are exhausted", func() {
@@ -997,7 +997,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-watch-init"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("creates watchers for existing triggers on startup", func() {
@@ -1026,7 +1026,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			Expect(r.WatchInit(bgCtx)).To(Succeed())
 
 			r.runningTriggersLock.Lock()
-			Expect(len(r.runningTriggers)).To(BeNumerically(">=", 1))
+			Expect(r.runningTriggers).NotTo(BeEmpty())
 			r.runningTriggersLock.Unlock()
 		})
 	})
@@ -1037,7 +1037,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	Context("SetupWithManager shutdown", func() {
 		It("cancels all running triggers when context is done", func() {
 			const name = "trigger-shutdown"
-			DeferCleanup(func() { cleanupTrigger(bgCtx, name, ns) })
+			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
@@ -1117,7 +1117,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 		const name = "trigger-label-selector"
 
 		AfterEach(func() {
-			cleanupTrigger(bgCtx, name, ns)
+			cleanupTrigger(bgCtx, name)
 		})
 
 		It("only fires for resources matching the label selector", func() {
