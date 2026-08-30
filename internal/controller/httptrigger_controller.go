@@ -382,7 +382,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		ResourceVersion:      resourceVersion,
 		TimeoutSeconds:       ptr.To(int64(60)),
 		Watch:                true,
-		AllowWatchBookmarks:  false,
+		AllowWatchBookmarks:  true,
 		SendInitialEvents:    ptr.To(trigger.Spec.SendInitialEvents),
 		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
 		LabelSelector:        strings.Join(trigger.Spec.LabelSelector, ","),
@@ -495,6 +495,21 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					handleError(fmt.Errorf("event conversion to unstructured failed"), logger)
 
 					return
+				}
+
+				if event.Type == watch.Bookmark {
+					bookmark, ok := event.Object.(*metav1.PartialObjectMetadata)
+					if !ok {
+						logger.Error(errors.New("failed to convert bookmark to metav1.PartialObjectMetadata"), "event", event)
+
+						continue
+					} else if bookmark == nil {
+						continue
+					}
+
+					logger.Info("Received bookmark event", "resourceVersion", bookmark.GetResourceVersion())
+
+					continue
 				}
 
 				if trigger.Spec.EventFilter != "" {
@@ -660,7 +675,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 						continue
 					}
 
-					logger.Info("Endpoint successfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
+					logger.Info("Endpoint successfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "eventType", event.Type)
 
 					for {
 						rv := metadata["resourceVersion"].(string)

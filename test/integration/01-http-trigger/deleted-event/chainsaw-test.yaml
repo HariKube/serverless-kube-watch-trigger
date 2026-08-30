@@ -1,12 +1,12 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: simple
+  name: deleted-event
 spec:
   timeouts:
-    exec: 1m
+    exec: 2m
   skipDelete: true
-  namespace: simple
+  namespace: deleted-event
   steps:
   - name: Create HTTP server
     try:
@@ -15,19 +15,19 @@ spec:
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: simple-http-trigger-webook
-            namespace: simple
+            name: deleted-event-webhook
+            namespace: deleted-event
             labels:
-              app: nginx
+              app: nginx-deleted
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: nginx
+                app: nginx-deleted
             template:
               metadata:
                 labels:
-                  app: nginx
+                  app: nginx-deleted
               spec:
                 containers:
                 - name: nginx
@@ -39,42 +39,57 @@ spec:
           apiVersion: v1
           kind: Service
           metadata:
-            name: nginx-service
-            namespace: simple
+            name: nginx-deleted-service
+            namespace: deleted-event
           spec:
             type: NodePort
             selector:
-              app: nginx
+              app: nginx-deleted
             ports:
               - protocol: TCP
-                port: 8888
+                port: 8890
                 targetPort: 80
     - assert:
         resource:
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: simple-http-trigger-webook
-            namespace: simple
+            name: deleted-event-webhook
+            namespace: deleted-event
           status:
             readyReplicas: 1
-  - name: Create http trigger
+  - name: Create watched ConfigMap and HTTPTrigger
     try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: watched-cm-deleted
+            namespace: deleted-event
+            labels:
+              watch-e2e-deleted: "true"
     - apply:
         resource:
           apiVersion: triggers.harikube.info/v1
           kind: HTTPTrigger
           metadata:
-            name: minimal-httptrigger-example
-            namespace: simple
+            name: deleted-event-trigger
+            namespace: deleted-event
           spec:
             resource:
-              apiVersion: apps/v1
-              kind: Deployment
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+              - deleted-event
+            labelSelectors:
+              - "watch-e2e-deleted=true"
+            eventTypes:
+              - DELETED
             url:
               service:
-                name: nginx-service
-                namespace: simple
+                name: nginx-deleted-service
+                namespace: deleted-event
                 uri:
                   static: "/"
             method: GET
@@ -83,29 +98,26 @@ spec:
           apiVersion: triggers.harikube.info/v1
           kind: HTTPTrigger
           metadata:
-            name: minimal-httptrigger-example
-            namespace: simple
+            name: deleted-event-trigger
+            namespace: deleted-event
     - sleep:
         duration: 1s
-  - name: Validate webhook trigger  
+  - name: Delete watched ConfigMap and validate webhook call
     try:
-    - patch:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: serverless-kube-watch-trigger-controller-manager 
-            namespace: serverless-kube-watch-trigger-system
-            labels:
-              trigger: change
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: ConfigMap
+          name: watched-cm-deleted
+          namespace: deleted-event
     - sleep:
         duration: 5s
     - script:
-        content: kubectl logs -n simple -l app=nginx | grep 'Go-http-client/1.1'
+        content: kubectl logs -n deleted-event -l app=nginx-deleted | grep 'Go-http-client/1.1'
   - name: Cleanup test
     try:
     - delete:
         ref:
           apiVersion: v1
           kind: Namespace
-          name: simple
+          name: deleted-event

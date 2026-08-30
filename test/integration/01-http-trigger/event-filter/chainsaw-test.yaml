@@ -1,0 +1,135 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: event-filter
+spec:
+  timeouts:
+    exec: 2m
+  skipDelete: true
+  namespace: event-filter
+  steps:
+  - name: Create HTTP server
+    try:
+    - apply:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: event-filter-webhook
+            namespace: event-filter
+            labels:
+              app: nginx-filter
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: nginx-filter
+            template:
+              metadata:
+                labels:
+                  app: nginx-filter
+              spec:
+                containers:
+                - name: nginx
+                  image: nginx:latest
+                  ports:
+                  - containerPort: 80
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: nginx-filter-service
+            namespace: event-filter
+          spec:
+            type: NodePort
+            selector:
+              app: nginx-filter
+            ports:
+              - protocol: TCP
+                port: 8891
+                targetPort: 80
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: event-filter-webhook
+            namespace: event-filter
+          status:
+            readyReplicas: 1
+  - name: Create HTTPTrigger with event filter that only accepts specific ConfigMap names
+    try:
+    - apply:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: event-filter-trigger
+            namespace: event-filter
+          spec:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+              - event-filter
+            labelSelectors:
+              - "watch-e2e-filter=true"
+            eventTypes:
+              - ADDED
+            # Only fire for a ConfigMap named exactly "allowed-cm"
+            eventFilter: 'eq .metadata.name "allowed-cm"'
+            url:
+              service:
+                name: nginx-filter-service
+                namespace: event-filter
+                uri:
+                  static: "/"
+            method: GET
+    - assert:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: event-filter-trigger
+            namespace: event-filter
+    - sleep:
+        duration: 1s
+  - name: Create non-matching ConfigMap – should NOT trigger webhook
+    try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: not-allowed-cm
+            namespace: event-filter
+            labels:
+              watch-e2e-filter: "true"
+    - sleep:
+        duration: 5s
+    - script:
+        # Nginx access log must NOT contain any hits from the trigger.
+        content: "! kubectl logs -n default -l app=nginx-filter | grep 'Go-http-client/1.1'"
+  - name: Create matching ConfigMap – should trigger webhook
+    try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: allowed-cm
+            namespace: event-filter
+            labels:
+              watch-e2e-filter: "true"
+    - sleep:
+        duration: 5s
+    - script:
+        content: kubectl logs -n event-filter -l app=nginx-filter | grep 'Go-http-client/1.1'
+  - name: Cleanup test
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: event-filter

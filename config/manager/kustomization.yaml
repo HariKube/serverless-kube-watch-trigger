@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: harikube/serverless-kube-watch-trigger
-  newTag: beta-v1.0.0-7-1-dirty
+  newTag: beta-v1.0.0-7-6-dirty

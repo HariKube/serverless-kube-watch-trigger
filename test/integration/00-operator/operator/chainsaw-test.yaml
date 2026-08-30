@@ -16,6 +16,8 @@ spec:
     try:
     - script:
         content: kubectl apply -f ../../../../package/bundle-${TAG}.yaml
+  - name: Configure extra RBAC
+    try:
     - assert:
         resource:
           apiVersion: apps/v1
@@ -25,3 +27,41 @@ spec:
             namespace: serverless-kube-watch-trigger-system
           status:
             readyReplicas: 1
+    - apply:
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: serverless-kube-watch-trigger-rolebinding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: serverless-kube-watch-trigger-role
+          subjects:
+          - kind: ServiceAccount
+            name: serverless-kube-watch-trigger-controller-manager
+            namespace: serverless-kube-watch-trigger-system
+    - apply:
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: serverless-kube-watch-trigger-role
+          rules:
+          - apiGroups:
+            - ""
+            resources:
+            - configmaps
+            - secrets
+            verbs:
+            - get
+            - list
+            - watch
+          - apiGroups:
+            - "apps"
+            resources:
+            - deployments
+            verbs:
+            - get
+            - list
+            - watch
