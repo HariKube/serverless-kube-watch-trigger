@@ -22,7 +22,7 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
     steps:
     - name: Clone the code
       uses: actions/checkout@v4
