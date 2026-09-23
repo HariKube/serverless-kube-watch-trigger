@@ -5,6 +5,8 @@ import (
 	"fmt"
 )
 
+const trueString = "true"
+
 func toJson(v any) string {
 	a, err := json.Marshal(v)
 	if err != nil {

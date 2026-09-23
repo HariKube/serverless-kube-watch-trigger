@@ -90,6 +90,7 @@ test-integration: setup-test-integration _test-integration
 _test-integration:
 	TAG=$(TAG) $(CHAINSAW) test --test-dir test/integration/00-operator
 	$(CHAINSAW) test --test-dir test/integration/01-http-trigger
+	$(CHAINSAW) test --test-dir test/integration/02-ai-trigger
 	$(MAKE) cleanup-test-integration
 
 .PHONY: cleanup-test-integration

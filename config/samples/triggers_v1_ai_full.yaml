@@ -1,0 +1,72 @@
+apiVersion: triggers.harikube.info/v1
+kind: AITrigger
+metadata:
+  name: full-aitrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  namespaces:
+    - default
+    - kube-system
+  labelSelectors:
+    - app=frontend
+  fieldSelectors:
+    - metadata.name=my-deployment
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  eventFilter: 'ne .status.availableReplicas 0'
+  concurrency: 2
+  sendInitialEvents: false
+
+  url:
+    static: "https://api.openai.com/v1/chat/completions"
+    # template: "https://gateway.example.com/{{ .metadata.namespace }}/chat/completions"
+    # service:
+    #   name: openai-proxy
+    #   namespace: default
+    #   portName: http
+    #   scheme: http
+    #   uri:
+    #     static: /v1/chat/completions
+  method: POST
+
+  auth:
+    tls:
+      caRef:
+        name: ai-provider-ca
+        key: ca.crt
+      certRef:
+        name: ai-provider-cert
+        key: tls.crt
+      keyRef:
+        name: ai-provider-cert
+        key: tls.key
+      insecureSkipVerify: false
+
+  headers:
+    static:
+      X-Cluster-ID: cluster-001
+    template:
+      X-Resource-Name: "{{ .metadata.name }}"
+      X-Resource-Namespace: "{{ .metadata.namespace }}"
+    fromSecretRef:
+      Authorization:
+        name: openai-api-key
+        key: bearer
+
+  delivery:
+    timeout: 30s
+    retries: 3
+
+  request:
+    model: gpt-4o-mini
+    systemPrompt: |
+      You summarize Kubernetes changes for SRE operators.
+    promptTemplate: |
+      Summarize the following {{ .kind }} event as JSON:
+      {{ toJson . }}
+    temperature: "0.2"
+    maxTokens: 256

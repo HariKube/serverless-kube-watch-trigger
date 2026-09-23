@@ -1,0 +1,23 @@
+apiVersion: triggers.harikube.info/v1
+kind: AITrigger
+metadata:
+  name: minimal-aitrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: ConfigMap
+  namespaces:
+    - default
+  url:
+    static: "https://api.openai.com/v1/chat/completions"
+  method: POST
+  headers:
+    fromSecretRef:
+      Authorization:
+        name: openai-api-key
+        key: bearer
+  request:
+    model: gpt-4o-mini
+    promptTemplate: |
+      Summarize the ConfigMap event for {{ .metadata.name }} in namespace {{ .metadata.namespace }}.

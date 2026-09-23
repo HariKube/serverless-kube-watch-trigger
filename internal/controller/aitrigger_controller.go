@@ -19,19 +19,16 @@ package controller
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"maps"
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,22 +56,20 @@ import (
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 )
 
-var ErrInvalidTriggerContent = errors.New("invalid trigger content")
-
-type watchInitializer interface {
-	WatchInit(ctx context.Context) error
+type aiChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-type Watcher struct {
-	Initializer watchInitializer
+type aiChatCompletionRequest struct {
+	Model       string          `json:"model"`
+	Messages    []aiChatMessage `json:"messages"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	MaxTokens   *int32          `json:"max_tokens,omitempty"`
 }
 
-func (w *Watcher) Start(ctx context.Context) error {
-	return w.Initializer.WatchInit(ctx)
-}
-
-// HTTPTriggerReconciler reconciles a HTTPTrigger object
-type HTTPTriggerReconciler struct {
+// AITriggerReconciler reconciles a AITrigger object
+type AITriggerReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	DynamicClient *dynamic.DynamicClient
@@ -84,25 +79,25 @@ type HTTPTriggerReconciler struct {
 	runningTriggers     map[string]func()
 }
 
-// +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=triggers.harikube.info,resources=aitriggers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=triggers.harikube.info,resources=aitriggers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=triggers.harikube.info,resources=aitriggers/finalizers,verbs=update
 
 // +kubebuilder:rbac:groups="",resources=secrets;services,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the HTTPTrigger object against the actual cluster state, and then
+// the AITrigger object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
-func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", req.NamespacedName)
+func (r *AITriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx).WithValues("controller", "aitrigger", "name", req.NamespacedName)
 
-	trigger := triggersv1.HTTPTrigger{}
+	trigger := triggersv1.AITrigger{}
 	if err := r.Get(ctx, req.NamespacedName, &trigger); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -171,7 +166,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 //nolint:gocyclo
-func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
+func (r *AITriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.AITrigger) error {
 	resourceVersion := "0"
 	if trigger.Status.ErrorResourceVersion != "" {
 		resourceVersion = trigger.Status.ErrorResourceVersion
@@ -228,14 +223,31 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		}
 		compiedTemapltes["uri_template"] = renderer
 	}
-	if trigger.Spec.Body.Template != "" {
-		renderer, err := template.New("body_template").Funcs(template.FuncMap{
-			"toJson": toJson,
-		}).Parse(trigger.Spec.Body.Template)
+	var temperature *float64
+	if trigger.Spec.Request.Temperature != nil {
+		parsedTemperature, err := strconv.ParseFloat(*trigger.Spec.Request.Temperature, 64)
 		if err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse temperature"))
 		}
-		compiedTemapltes["body_template"] = renderer
+		temperature = &parsedTemperature
+	}
+
+	requestTemplateFuncs := template.FuncMap{
+		"toJson": toJson,
+	}
+	if trigger.Spec.Request.SystemPrompt != "" {
+		renderer, err := template.New("system_prompt_template").Funcs(requestTemplateFuncs).Parse(trigger.Spec.Request.SystemPrompt)
+		if err != nil {
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse system prompt template"))
+		}
+		compiedTemapltes["system_prompt_template"] = renderer
+	}
+	if trigger.Spec.Request.PromptTemplate != "" {
+		renderer, err := template.New("prompt_template").Funcs(requestTemplateFuncs).Parse(trigger.Spec.Request.PromptTemplate)
+		if err != nil {
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse prompt template"))
+		}
+		compiedTemapltes["prompt_template"] = renderer
 	}
 	for k, v := range trigger.Spec.Headers.Template {
 		renderer, err := template.New("header_template_" + k).Parse(v)
@@ -299,22 +311,15 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		headerSecrets[k] = string(headerSecret.Data[v.Key])
 	}
 
-	var signature []byte
-	if trigger.Spec.Body.Signature.KeySecretRef.Name != "" {
-		signatureSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Body.Signature.KeySecretRef.Name,
-		}, &signatureSecret); err != nil {
-			return err
-		}
-		signature = signatureSecret.Data[trigger.Spec.Body.Signature.KeySecretRef.Key]
+	concurrency := trigger.Spec.Concurrency
+	if concurrency == 0 {
+		concurrency = 1
 	}
 
 	httpTransport := &http.Transport{
-		MaxIdleConns:          int(trigger.Spec.Concurrency * 2),
-		MaxIdleConnsPerHost:   int(trigger.Spec.Concurrency),
-		MaxConnsPerHost:       int(trigger.Spec.Concurrency * 2),
+		MaxIdleConns:          int(concurrency * 2),
+		MaxIdleConnsPerHost:   int(concurrency),
+		MaxConnsPerHost:       int(concurrency * 2),
 		IdleConnTimeout:       time.Minute,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -469,7 +474,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
 	logger.Info("Watcher started")
 
-	for i := 1; i <= int(trigger.Spec.Concurrency); i++ {
+	for i := 1; i <= int(concurrency); i++ {
 		go func() {
 			for {
 				_, data, ok := reflect.Select(cases)
@@ -572,23 +577,50 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					return
 				}
 
-				body := ""
-				if trigger.Spec.Body.Template != "" {
-					var renderedBody bytes.Buffer
-					if err := compiedTemapltes["body_template"].Execute(&renderedBody, unstructuredObj.Object); err != nil {
+				var systemPrompt string
+				if trigger.Spec.Request.SystemPrompt != "" {
+					var renderedSystemPrompt bytes.Buffer
+					if err := compiedTemapltes["system_prompt_template"].Execute(&renderedSystemPrompt, unstructuredObj.Object); err != nil {
 						handleError(err, logger)
 
 						return
 					}
-					body = renderedBody.String()
+					systemPrompt = renderedSystemPrompt.String()
 				}
 
-				contentType := "application/json"
-				if trigger.Spec.Body.ContentType != "" {
-					contentType = trigger.Spec.Body.ContentType
+				var renderedPrompt bytes.Buffer
+				if err := compiedTemapltes["prompt_template"].Execute(&renderedPrompt, unstructuredObj.Object); err != nil {
+					handleError(err, logger)
+
+					return
 				}
+
+				payload := aiChatCompletionRequest{
+					Model: trigger.Spec.Request.Model,
+					Messages: []aiChatMessage{{
+						Role:    "user",
+						Content: renderedPrompt.String(),
+					}},
+					Temperature: temperature,
+					MaxTokens:   trigger.Spec.Request.MaxTokens,
+				}
+				if systemPrompt != "" {
+					payload.Messages = append([]aiChatMessage{{
+						Role:    "system",
+						Content: systemPrompt,
+					}}, payload.Messages...)
+				}
+
+				payloadBytes, err := json.Marshal(payload)
+				if err != nil {
+					handleError(err, logger)
+
+					return
+				}
+				body := string(payloadBytes)
+
 				headers := map[string]string{
-					"Content-Type": contentType,
+					"Content-Type": "application/json",
 				}
 				maps.Copy(headers, trigger.Spec.Headers.Static)
 				for k := range trigger.Spec.Headers.Template {
@@ -604,21 +636,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					headers[k] = headerSecrets[k]
 				}
 
-				switch {
-				case trigger.Spec.Body.Signature.HMAC != nil:
-					var hash func() hash.Hash
-					switch trigger.Spec.Body.Signature.HMAC.HashType {
-					case triggersv1.SignatureHashTypeSHA256:
-						hash = sha256.New
-					case triggersv1.SignatureHashTypeSHA512:
-						hash = sha512.New
-					}
-
-					hasher := hmac.New(hash, signature)
-					hasher.Write([]byte(body))
-					signatureBytes := hasher.Sum(nil)
-
-					headers[trigger.Spec.Body.Signature.Header] = hex.EncodeToString(signatureBytes)
+				method := string(trigger.Spec.Method)
+				if method == "" {
+					method = http.MethodPost
 				}
 
 				var retryErr error
@@ -629,7 +649,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 					}
 					reqCtx, reqCancel := context.WithTimeout(ctx, timeout)
 
-					req, err := http.NewRequestWithContext(reqCtx, string(trigger.Spec.Method), url, strings.NewReader(body))
+					req, err := http.NewRequestWithContext(reqCtx, method, url, strings.NewReader(body))
 					if err != nil {
 						handleError(err, logger)
 						reqCancel()
@@ -714,14 +734,14 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	return nil
 }
 
-func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
+func (r *AITriggerReconciler) WatchInit(ctx context.Context) error {
 	r.runningTriggersLock.Lock()
 	defer r.runningTriggersLock.Unlock()
 
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 
-	existingTriggers := triggersv1.HTTPTriggerList{}
+	existingTriggers := triggersv1.AITriggerList{}
 	if err := r.List(ctx, &existingTriggers); err != nil {
 		return err
 	}
@@ -740,7 +760,7 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, maxConcurrentReconciles int, wg *sync.WaitGroup) error {
+func (r *AITriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, maxConcurrentReconciles int, wg *sync.WaitGroup) error {
 	r.ctx = ctx
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
@@ -769,8 +789,8 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 	}()
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&triggersv1.HTTPTrigger{}).
-		Named("httptrigger").
+		For(&triggersv1.AITrigger{}).
+		Named("aitrigger").
 		WithOptions(controller.Options{
 			NeedLeaderElection:      ptr.To(true),
 			MaxConcurrentReconciles: maxConcurrentReconciles,

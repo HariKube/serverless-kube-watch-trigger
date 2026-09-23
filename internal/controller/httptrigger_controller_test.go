@@ -384,7 +384,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 					Name:      resourceName,
 					Namespace: "default",
 					Labels: map[string]string{
-						"test": "true",
+						"test": trueString,
 					},
 				},
 			}

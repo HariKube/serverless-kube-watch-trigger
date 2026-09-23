@@ -16,6 +16,7 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
+  - aitriggers
   - httptriggers
   verbs:
   - create
@@ -28,12 +29,14 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
+  - aitriggers/finalizers
   - httptriggers/finalizers
   verbs:
   - update
 - apiGroups:
   - triggers.harikube.info
   resources:
+  - aitriggers/status
   - httptriggers/status
   verbs:
   - get

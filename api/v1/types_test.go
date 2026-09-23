@@ -58,27 +58,45 @@ var _ = Describe("API v1 Types", func() {
 	})
 
 	Describe("AddToScheme", func() {
-		It("registers HTTPTrigger and HTTPTriggerList with the scheme", func() {
+		It("registers HTTPTrigger, AITrigger, and their list types with the scheme", func() {
 			s := scheme.Scheme
 			Expect(triggersv1.AddToScheme(s)).To(Succeed())
 
-			gvk := schema.GroupVersionKind{
+			httpGVK := schema.GroupVersionKind{
 				Group:   "triggers.harikube.info",
 				Version: "v1",
 				Kind:    "HTTPTrigger",
 			}
-			obj, err := s.New(gvk)
+			httpObj, err := s.New(httpGVK)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(obj).To(BeAssignableToTypeOf(&triggersv1.HTTPTrigger{}))
+			Expect(httpObj).To(BeAssignableToTypeOf(&triggersv1.HTTPTrigger{}))
 
-			gvkList := schema.GroupVersionKind{
+			httpGVKList := schema.GroupVersionKind{
 				Group:   "triggers.harikube.info",
 				Version: "v1",
 				Kind:    "HTTPTriggerList",
 			}
-			objList, err := s.New(gvkList)
+			httpObjList, err := s.New(httpGVKList)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(objList).To(BeAssignableToTypeOf(&triggersv1.HTTPTriggerList{}))
+			Expect(httpObjList).To(BeAssignableToTypeOf(&triggersv1.HTTPTriggerList{}))
+
+			aiGVK := schema.GroupVersionKind{
+				Group:   "triggers.harikube.info",
+				Version: "v1",
+				Kind:    "AITrigger",
+			}
+			aiObj, err := s.New(aiGVK)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(aiObj).To(BeAssignableToTypeOf(&triggersv1.AITrigger{}))
+
+			aiGVKList := schema.GroupVersionKind{
+				Group:   "triggers.harikube.info",
+				Version: "v1",
+				Kind:    "AITriggerList",
+			}
+			aiObjList, err := s.New(aiGVKList)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(aiObjList).To(BeAssignableToTypeOf(&triggersv1.AITriggerList{}))
 		})
 	})
 
@@ -120,6 +138,43 @@ var _ = Describe("API v1 Types", func() {
 			list, ok := copy.(*triggersv1.HTTPTriggerList)
 			Expect(ok).To(BeTrue())
 			Expect(list.Items[0].Name).To(Equal("item0"))
+		})
+	})
+
+	Describe("AITrigger DeepCopy", func() {
+		It("produces an independent copy", func() {
+			temperature := "0.5"
+			original := &triggersv1.AITrigger{}
+			original.Name = "original-ai"
+			original.Spec.Request.Model = "gpt-4o-mini"
+			original.Spec.Request.PromptTemplate = "{{ .metadata.name }}"
+			original.Spec.Request.Temperature = &temperature
+
+			copy := original.DeepCopy()
+			Expect(copy.Name).To(Equal("original-ai"))
+			Expect(copy.Spec.Request.Temperature).NotTo(BeNil())
+
+			copy.Name = "copy-ai"
+			*copy.Spec.Request.Temperature = "0.8"
+
+			Expect(original.Name).To(Equal("original-ai"))
+			Expect(*original.Spec.Request.Temperature).To(Equal("0.5"))
+		})
+	})
+
+	Describe("AITriggerList DeepCopy", func() {
+		It("produces an independent copy", func() {
+			original := &triggersv1.AITriggerList{
+				Items: []triggersv1.AITrigger{{}},
+			}
+			original.Items[0].Name = "ai-item0"
+
+			copy := original.DeepCopyObject()
+			Expect(copy).NotTo(BeNil())
+
+			list, ok := copy.(*triggersv1.AITriggerList)
+			Expect(ok).To(BeTrue())
+			Expect(list.Items[0].Name).To(Equal("ai-item0"))
 		})
 	})
 

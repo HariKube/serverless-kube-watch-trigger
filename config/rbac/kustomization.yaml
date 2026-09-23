@@ -35,4 +35,7 @@ resources:
 - httptrigger_admin_role.yaml
 - httptrigger_editor_role.yaml
 - httptrigger_viewer_role.yaml
+- aitrigger_admin_role.yaml
+- aitrigger_editor_role.yaml
+- aitrigger_viewer_role.yaml
 

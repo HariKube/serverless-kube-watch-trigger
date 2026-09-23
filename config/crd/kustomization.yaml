@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/triggers.harikube.info_httptriggers.yaml
+- bases/triggers.harikube.info_aitriggers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

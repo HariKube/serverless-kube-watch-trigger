@@ -3,7 +3,7 @@ A lightweight Kubernetes operator that turns **Kubernetes API server watch event
 
 ## Description
 `Serverless-kube-watch-trigger` bridges the gap between **Kubernetes-native resource events** and **serverless workloads**.  
-At its core, it watches selected Kubernetes resources (built-in or CRDs) using efficient watch streams, and then dispatches structured trigger events based on user-defined specifications. These triggers can launch serverless functions (e.g. OpenFaaS, Knative), send webhooks, or integrate with external systems such as CI/CD pipelines or monitoring tools.
+At its core, it watches selected Kubernetes resources (built-in or CRDs) using efficient watch streams, and then dispatches structured trigger events based on user-defined specifications. These triggers can launch serverless functions (e.g. OpenFaaS, Knative), send webhooks, call OpenAI-compatible AI model APIs, or integrate with external systems such as CI/CD pipelines or monitoring tools.
 
 ## Installation
 
@@ -14,6 +14,8 @@ Please follow the guide in the [release](https://github.com/HariKube/serverless-
 ### 📌 Overview
 
 An `HTTPTrigger` watches a target Kubernetes resource (e.g., `Deployment` or any other Custom Resources), filters events, and sends HTTP requests when matching events happen.
+
+An `AITrigger` uses the same watch/filter/retry mechanics, but sends an OpenAI-compatible chat-completions request to an AI provider or gateway whenever a matching event arrives.
 
 Each trigger consists of:
 
@@ -210,6 +212,77 @@ kubectl apply -f full-httptrigger-example.yaml
 ```
 
 Then modify or create a matching `Deployment` — the webhook endpoint will receive JSON payloads for every matching event.
+
+---
+
+## 🤖 AITrigger
+
+`AITrigger` reuses the same Kubernetes watch semantics as `HTTPTrigger` and calls an OpenAI-compatible `/v1/chat/completions` endpoint.
+
+### Example
+
+```yaml
+apiVersion: triggers.harikube.info/v1
+kind: AITrigger
+metadata:
+  name: deployment-summary
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  namespaces:
+    - default
+  eventTypes:
+    - ADDED
+    - MODIFIED
+
+  url:
+    static: "https://api.openai.com/v1/chat/completions"
+  method: POST
+
+  headers:
+    fromSecretRef:
+      Authorization:
+        name: openai-api-key
+        key: bearer
+
+  request:
+    model: gpt-4o-mini
+    systemPrompt: |
+      You summarize Kubernetes deployment changes for platform engineers.
+    promptTemplate: |
+      Summarize this event and list the most important fields as JSON:
+      {{ toJson . }}
+    temperature: "0.2"
+    maxTokens: 256
+```
+
+### AITrigger fields
+
+`AITrigger` supports the same:
+
+* resource selection (`resource`, `namespaces`, `labelSelectors`, `fieldSelectors`, `eventTypes`, `eventFilter`)
+* endpoint resolution (`url.static`, `url.template`, `url.service`)
+* transport/auth options (`method`, `auth`, `headers`, `delivery`)
+* status handling and automatic watcher restart behavior
+
+In addition, `spec.request` defines the model invocation payload:
+
+| Field | Description |
+| --- | --- |
+| `model` | OpenAI-compatible model identifier. |
+| `systemPrompt` | Optional Go template rendered as the system message. |
+| `promptTemplate` | Required Go template rendered as the user message from the watched object. |
+| `temperature` | Optional sampling temperature as a decimal string, for example `"0.2"`. |
+| `maxTokens` | Optional `max_tokens` value sent to the provider. |
+
+### Notes
+
+* The controller sends an OpenAI-compatible JSON payload with `model`, `messages`, `temperature`, and `max_tokens`.
+* Use `headers.fromSecretRef.Authorization` to inject a bearer token such as `Bearer <api-key>`.
+* `url.static`, `url.template`, and `url.service` allow direct provider access or routing through an internal AI gateway.
+* `toJson` is available in `systemPrompt` and `promptTemplate`.
 
 ---
 

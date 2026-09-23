@@ -268,7 +268,21 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
 		os.Exit(1)
 	}
-	if err := mgr.Add(&controller.Watcher{Reconciler: httpReconciler}); err != nil {
+	if err := mgr.Add(&controller.Watcher{Initializer: httpReconciler}); err != nil {
+		setupLog.Error(err, "unable to create watcher", "controller", "Watcher")
+		os.Exit(1)
+	}
+
+	aiReconciler := &controller.AITriggerReconciler{
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		DynamicClient: dynamicKubeClient,
+	}
+	if err := aiReconciler.SetupWithManager(ctx, mgr, maxConcurrentReconciles, &wg); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AITrigger")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&controller.Watcher{Initializer: aiReconciler}); err != nil {
 		setupLog.Error(err, "unable to create watcher", "controller", "Watcher")
 		os.Exit(1)
 	}

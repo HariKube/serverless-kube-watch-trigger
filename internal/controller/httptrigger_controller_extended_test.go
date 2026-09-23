@@ -560,7 +560,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name + "-cm",
 					Namespace: ns,
-					Labels:    map[string]string{"watch-modified": "true"},
+					Labels:    map[string]string{"watch-modified": trueString},
 				},
 			}
 			Expect(k8sClient.Create(bgCtx, cm)).To(Succeed())
@@ -599,7 +599,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			if patchedCM.Annotations == nil {
 				patchedCM.Annotations = map[string]string{}
 			}
-			patchedCM.Annotations["patched"] = "true"
+			patchedCM.Annotations["patched"] = trueString
 			Expect(k8sClient.Update(bgCtx, patchedCM)).To(Succeed())
 
 			Eventually(called.Load, 15*time.Second, 200*time.Millisecond).Should(BeTrue())
@@ -628,7 +628,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name + "-cm",
 					Namespace: ns,
-					Labels:    map[string]string{"watch-deleted": "true"},
+					Labels:    map[string]string{"watch-deleted": trueString},
 				},
 			}
 			Expect(k8sClient.Create(bgCtx, cm)).To(Succeed())
