@@ -50,8 +50,10 @@ jobs:
       env:
         IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
         TAG: ${{ steps.extract_branch.outputs.branch }}
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v4
     - name: Set up Docker Buildx
-      uses: docker/build-push-action@v6
+      uses: docker/setup-buildx-action@v3
     - name: Build and push (forks)
       uses: docker/build-push-action@v6
       with:
