@@ -32,6 +32,10 @@ jobs:
       uses: actions/setup-go@v5
       with:
           go-version-file: go.mod
+    - name: Install devbox
+      uses: jetify-com/devbox-install-action@v0.12.0
+      with:
+        enable-cache: 'true'
     - name: Extract branch name
       run: echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
       id: extract_branch
@@ -42,7 +46,7 @@ jobs:
         username: ${{ vars.REGISTRY_USER }}
         password: ${{ secrets.REGISTRY_TOKEN }}
     - name: Generate bundle
-      run: make package
+      run: devbox run make package
       env:
         IMG: ${{ vars.REGISTRY }}/${{ vars.REPOSITORY }}/serverless-kube-watch-trigger:${{ steps.extract_branch.outputs.branch }}
         TAG: ${{ steps.extract_branch.outputs.branch }}
