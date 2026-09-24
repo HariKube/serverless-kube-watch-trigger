@@ -93,7 +93,7 @@ spec:
             namespace: trigger-delete
     - sleep:
         duration: 1s
-  - name: Delete the HTTPTrigger and create a matching ConfigMap – webhook must NOT be called
+  - name: Delete the HTTPTrigger and create a matching ConfigMap - webhook must NOT be called
     try:
     - delete:
         ref:

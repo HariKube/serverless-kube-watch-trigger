@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,9 +52,12 @@ func newReconciler() *HTTPTriggerReconciler {
 		Client:              k8sClient,
 		DynamicClient:       dynamicClient,
 		Scheme:              k8sClient.Scheme(),
+		Recorder:            record.NewFakeRecorder(10),
 		ctx:                 ctx,
 		runningTriggersLock: sync.Mutex{},
 		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
 	}
 	DeferCleanup(func() {
 		r.runningTriggersLock.Lock()
@@ -90,14 +94,14 @@ func cleanupService(ctx context.Context, name string) {
 	}
 }
 
-var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
+var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 	const ns = "default"
 	bgCtx := context.Background()
 
 	// ─────────────────────────────────────────────────────────────
 	// Reconcile: trigger not found returns no error
 	// ─────────────────────────────────────────────────────────────
-	Context("Reconcile – trigger not found", func() {
+	Context("Reconcile - trigger not found", func() {
 		It("returns no error when the resource does not exist", func() {
 			r := newReconciler()
 			_, err := r.Reconcile(bgCtx, reconcile.Request{
@@ -110,7 +114,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	// ─────────────────────────────────────────────────────────────
 	// Reconcile: no-op when up-to-date (no error, same generation)
 	// ─────────────────────────────────────────────────────────────
-	Context("Reconcile – short-circuit when already up to date", func() {
+	Context("Reconcile - short-circuit when already up to date", func() {
 		const name = "trigger-noop"
 		var srv *httptest.Server
 
@@ -144,7 +148,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			r := newReconciler()
 			nsn := types.NamespacedName{Name: name, Namespace: ns}
 
-			// First reconcile – starts the watcher.
+			// First reconcile - starts the watcher.
 			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -165,16 +169,94 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			r.runningTriggers = map[string]func(){}
 			r.runningTriggersLock.Unlock()
 
-			// Second reconcile – should be a no-op (returns immediately).
+			// Second reconcile - should be a no-op (returns immediately).
 			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
 			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 
 	// ─────────────────────────────────────────────────────────────
+	// Reconcile: watcher cleanup when a trigger is deleted
+	// ─────────────────────────────────────────────────────────────
+	Context("Reconcile - removes the watcher session when a trigger is deleted", func() {
+		const name = "trigger-cleanup"
+		var cancelCalled atomic.Bool
+		var srv *httptest.Server
+
+		BeforeEach(func() {
+			cancelCalled.Store(false)
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+					},
+					HTTP: triggersv1.HTTP{
+						URL:    triggersv1.URL{Static: ptr.To(srv.URL + "/hook")},
+						Method: "POST",
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			srv.Close()
+			cleanupTrigger(bgCtx, name)
+		})
+
+		It("cancels and drops the running watcher when the trigger is gone (NotFound)", func() {
+			r := newReconciler()
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+			key := nsn.String()
+
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			r.runningTriggersLock.Lock()
+			_, registered := r.runningTriggers[key]
+			r.runningTriggersLock.Unlock()
+			Expect(registered).To(BeTrue())
+
+			// Swap in a spy cancel so we can observe the session being stopped.
+			r.runningTriggersLock.Lock()
+			r.runningTriggers[key] = func() { cancelCalled.Store(true) }
+			r.runningTriggersLock.Unlock()
+
+			// Simulate a hard delete (no finalizer): the object disappears, so
+			// the next reconcile's Get returns NotFound.
+			Expect(k8sClient.Delete(bgCtx, &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			})).To(Succeed())
+
+			Eventually(func() bool {
+				err := k8sClient.Get(bgCtx, nsn, &triggersv1.HTTPTrigger{})
+				return errors.IsNotFound(err)
+			}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
+
+			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() bool { return cancelCalled.Load() }, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+			Eventually(func() int {
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+
+				return len(r.runningTriggers)
+			}, 10*time.Second, 100*time.Millisecond).Should(BeZero())
+		})
+	})
+
+	// ─────────────────────────────────────────────────────────────
 	// Reconcile: cancel existing watcher on update
 	// ─────────────────────────────────────────────────────────────
-	Context("Reconcile – cancels existing watcher on update", func() {
+	Context("Reconcile - cancels existing watcher on update", func() {
 		const name = "trigger-update"
 		var srv *httptest.Server
 
@@ -207,7 +289,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			r := newReconciler()
 			nsn := types.NamespacedName{Name: name, Namespace: ns}
 
-			// First reconcile – starts watcher and patches status.LastGeneration = 1.
+			// First reconcile - starts watcher and patches status.LastGeneration = 1.
 			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -226,14 +308,14 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			r.runningTriggersLock.Unlock()
 
 			// Simulate an error condition so the next reconcile does NOT short-circuit.
-			// Patch status.ErrorTime to non-zero so the short-circuit check fails.
+			// Patch status.Phase to Error so the short-circuit check fails.
 			latest := &triggersv1.HTTPTrigger{}
 			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
 			patched := latest.DeepCopy()
-			patched.Status.ErrorTime = metav1.Now()
+			patched.Status.Phase = triggersv1.TriggerPhaseError
 			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
 
-			// Second reconcile while watcher is still running – should call cancel and return early.
+			// Second reconcile while watcher is still running - should call cancel and return early.
 			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -243,9 +325,85 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	})
 
 	// ─────────────────────────────────────────────────────────────
-	// Reconcile: ErrInvalidTriggerContent – bad template
+	// Reconcile: reports Running after watcher recovery restart
 	// ─────────────────────────────────────────────────────────────
-	Context("Reconcile – invalid trigger content", func() {
+	Context("Reconcile - reports Running after watcher recovery restart", func() {
+		const name = "trigger-recovery"
+		var srv *httptest.Server
+
+		BeforeEach(func() {
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+					},
+					HTTP: triggersv1.HTTP{
+						URL:    triggersv1.URL{Static: ptr.To(srv.URL)},
+						Method: "POST",
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			srv.Close()
+			cleanupTrigger(bgCtx, name)
+		})
+
+		It("re-establishes the watcher, reports Running and keeps the error detail", func() {
+			r := newReconciler()
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+
+			// First reconcile - starts watcher and reports Running.
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the error status patch made by handleTriggerWatcherError.
+			latest := &triggersv1.HTTPTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			patched := latest.DeepCopy()
+			patched.Status.Phase = triggersv1.TriggerPhaseError
+			patched.Status.ErrorTime = metav1.Now()
+			patched.Status.ErrorReason = "retry failed: status code is 500"
+			patched.Status.ErrorResourceVersion = "42"
+			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
+
+			// handleTriggerWatcherError removes the failed watcher from the map.
+			r.runningTriggersLock.Lock()
+			delete(r.runningTriggers, nsn.String())
+			r.runningTriggersLock.Unlock()
+
+			// Second reconcile - recovery restart: the watcher must be
+			// re-established and the trigger must report Running again (with
+			// the last failure retained for diagnostics) so users can tell the
+			// trigger is healthy rather than stuck.
+			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			r.runningTriggersLock.Lock()
+			Expect(r.runningTriggers).To(HaveKey(nsn.String()))
+			r.runningTriggersLock.Unlock()
+
+			updated := &triggersv1.HTTPTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+			Expect(updated.Status.ErrorReason).To(Equal("retry failed: status code is 500"))
+			Expect(updated.Status.ErrorTime.IsZero()).To(BeFalse())
+			Expect(updated.Status.ErrorResourceVersion).To(Equal("42"))
+		})
+	})
+
+	// ─────────────────────────────────────────────────────────────
+	// Reconcile: ErrInvalidTriggerContent - bad template
+	// ─────────────────────────────────────────────────────────────
+	Context("Reconcile - invalid trigger content", func() {
 		const name = "trigger-invalid"
 
 		AfterEach(func() {
@@ -285,7 +443,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	// ─────────────────────────────────────────────────────────────
 	// Reconcile: deletion path
 	// ─────────────────────────────────────────────────────────────
-	Context("Reconcile – deletion path", func() {
+	Context("Reconcile - deletion path", func() {
 		const name = "trigger-delete"
 		var srv *httptest.Server
 
@@ -410,7 +568,7 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	})
 
 	// ─────────────────────────────────────────────────────────────
-	// URL.Service strategy – static URI
+	// URL.Service strategy - static URI
 	// ─────────────────────────────────────────────────────────────
 	Context("URL.Service strategy", func() {
 		const (
@@ -474,9 +632,9 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	})
 
 	// ─────────────────────────────────────────────────────────────
-	// URL.Service – template URI and port-by-name resolution
+	// URL.Service - template URI and port-by-name resolution
 	// ─────────────────────────────────────────────────────────────
-	Context("URL.Service – template URI with port name resolution", func() {
+	Context("URL.Service - template URI with port name resolution", func() {
 		const (
 			name       = "trigger-service-tpl"
 			svcNameTpl = "test-endpoint-svc-tpl"
@@ -719,9 +877,9 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 	})
 
 	// ─────────────────────────────────────────────────────────────
-	// EventFilter – rejection (non-matching filter skips dispatch)
+	// EventFilter - rejection (non-matching filter skips dispatch)
 	// ─────────────────────────────────────────────────────────────
-	Context("EventFilter – rejection", func() {
+	Context("EventFilter - rejection", func() {
 		const name = "trigger-filter-reject"
 
 		AfterEach(func() {
@@ -987,6 +1145,95 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 				_ = k8sClient.Get(bgCtx, nsn, updated)
 				return updated.Status.ErrorReason
 			}, 30*time.Second, 500*time.Millisecond).ShouldNot(BeEmpty())
+
+			var failureEvent string
+			Eventually(r.Recorder.(*record.FakeRecorder).Events, 10*time.Second, 100*time.Millisecond).Should(Receive(&failureEvent))
+			Expect(failureEvent).To(ContainSubstring("Warning"))
+			Expect(failureEvent).To(ContainSubstring("TriggerCallFailed"))
+			Expect(failureEvent).To(ContainSubstring(nsn.String()))
+			Expect(failureEvent).To(ContainSubstring("status code is 500"))
+		})
+
+		It("records a fresh ErrorReason over a retained latch after a recovery restart", func() {
+			// Server always returns 500.
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			DeferCleanup(srv.Close)
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+						EventType:  []triggersv1.EventType{triggersv1.EventTypeAdded},
+					},
+					HTTP: triggersv1.HTTP{
+						URL:    triggersv1.URL{Static: ptr.To(srv.URL + "/hook")},
+						Method: "POST",
+						Delivery: triggersv1.Delivery{
+							Timeout: metav1.Duration{Duration: time.Second},
+							Retries: 0,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+
+			r := newReconciler()
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate a previously recorded failure: Phase=Error with a latch,
+			// followed by a recovery restart that reports Running while
+			// retaining the failure detail.
+			latest := &triggersv1.HTTPTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			patched := latest.DeepCopy()
+			patched.Status.Phase = triggersv1.TriggerPhaseError
+			patched.Status.ErrorTime = metav1.Now()
+			patched.Status.ErrorReason = "old failure"
+			patched.Status.ErrorResourceVersion = "0"
+			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
+
+			r.runningTriggersLock.Lock()
+			delete(r.runningTriggers, nsn.String())
+			r.runningTriggersLock.Unlock()
+
+			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &triggersv1.HTTPTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+			Expect(updated.Status.ErrorReason).To(Equal("old failure"))
+
+			// A fresh delivery failure in the recovered session must overwrite
+			// the retained latch and flip the phase back to Error.
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: name + "-cm2", Namespace: ns},
+			}
+			Expect(k8sClient.Create(bgCtx, cm)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(bgCtx, cm) })
+
+			Eventually(func() string {
+				_ = k8sClient.Get(bgCtx, nsn, updated)
+				return updated.Status.ErrorReason
+			}, 30*time.Second, 500*time.Millisecond).Should(ContainSubstring("status code is 500"))
+
+			// The error status write triggers a recovery reconcile (as the
+			// manager's status watch would), which reports Running while
+			// retaining the updated failure detail.
+			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() triggersv1.TriggerPhase {
+				_ = k8sClient.Get(bgCtx, nsn, updated)
+				return updated.Status.Phase
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(triggersv1.TriggerPhaseRunning))
+			Expect(updated.Status.ErrorReason).To(ContainSubstring("status code is 500"))
 		})
 	})
 
@@ -1182,6 +1429,108 @@ var _ = Describe("HTTPTrigger Controller – additional coverage", func() {
 			// Give a moment then assert count did not grow due to the non-matching CM.
 			Consistently(func() int32 { return matchCount.Load() }, time.Second, 200*time.Millisecond).
 				Should(BeNumerically("<=", 2)) // at most once per CM watched (only the matching one)
+		})
+	})
+
+	// ─────────────────────────────────────────────────────────────
+	// Reconcile - concurrency & scale posture
+	// ─────────────────────────────────────────────────────────────
+	Context("Reconcile - concurrent triggers reconcile in parallel", func() {
+		const count = 12
+
+		var (
+			calls atomic.Int32
+			srv   *httptest.Server
+			srcCm *corev1.ConfigMap
+		)
+
+		BeforeEach(func() {
+			calls.Store(0)
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			// A pre-existing watched object: every session replays it via
+			// SendInitialEvents, making delivery deterministic regardless of
+			// when each watcher stream actually comes up.
+			srcCm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "conc-source", Namespace: ns}}
+			Expect(k8sClient.Create(bgCtx, srcCm)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(bgCtx, srcCm) })
+		})
+
+		It("registers an independent watcher session for every concurrently-reconciled trigger and delivers an event to each", func() {
+			r := newReconciler()
+
+			for i := 0; i < count; i++ {
+				name := fmt.Sprintf("conc-%d", i)
+				trigger := &triggersv1.HTTPTrigger{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+					Spec: triggersv1.HTTPTriggerSpec{
+						TriggerSpec: triggersv1.TriggerSpec{
+							Resource:          metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+							Namespaces:        []string{ns},
+							EventType:         []triggersv1.EventType{triggersv1.EventTypeAdded},
+							SendInitialEvents: true,
+						},
+						HTTP: triggersv1.HTTP{
+							URL:    triggersv1.URL{Static: ptr.To(srv.URL + "/hook")},
+							Method: "POST",
+							Delivery: triggersv1.Delivery{
+								Timeout: metav1.Duration{Duration: 5 * time.Second},
+								Retries: 1,
+							},
+						},
+					},
+				}
+				Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+				DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+			}
+
+			// Reconcile all triggers concurrently: distinct triggers must not
+			// serialize on a single global mutex. Exercised under -race in CI.
+			var wg sync.WaitGroup
+			errCh := make(chan error, count)
+
+			for i := 0; i < count; i++ {
+				nsn := types.NamespacedName{Name: fmt.Sprintf("conc-%d", i), Namespace: ns}
+				wg.Add(1)
+
+				go func() {
+					defer wg.Done()
+
+					if _, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn}); err != nil {
+						errCh <- err
+					}
+				}()
+			}
+
+			wg.Wait()
+			close(errCh)
+			for err := range errCh {
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Every trigger owns a live watcher session.
+			Eventually(func() int {
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+
+				return len(r.runningTriggers)
+			}, 15*time.Second, 100*time.Millisecond).Should(Equal(count))
+
+			for i := 0; i < count; i++ {
+				r.runningTriggersLock.Lock()
+				_, ok := r.runningTriggers[ns+"/conc-"+fmt.Sprint(i)]
+				r.runningTriggersLock.Unlock()
+
+				Expect(ok).To(BeTrue())
+			}
+
+			// The pre-existing source configmap is delivered once per session.
+			Eventually(func() int32 { return calls.Load() }, 30*time.Second, 200*time.Millisecond).
+				Should(BeNumerically(">=", count))
 		})
 	})
 })

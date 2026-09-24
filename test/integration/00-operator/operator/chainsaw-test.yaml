@@ -15,7 +15,9 @@ spec:
   - name: Deploy operator
     try:
     - script:
-        content: kubectl apply -f ../../../../package/bundle-${TAG}.yaml
+        content: |
+          TAG="$(git -C ../../../../ describe --tags --abbrev=0)"
+          kubectl apply -f "../../../../package/bundle-${TAG}.yaml"
   - name: Configure extra RBAC
     try:
     - assert:

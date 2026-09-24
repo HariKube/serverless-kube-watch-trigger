@@ -80,6 +80,7 @@ type AITriggerSpec struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="ErrorTime",type="string",JSONPath=".status.errorTime"
 // +kubebuilder:printcolumn:name="ErrorReason",type="string",JSONPath=".status.errorReason"
 // +kubebuilder:printcolumn:name="ErrorResourceVersion",type="string",JSONPath=".status.errorResourceVersion"

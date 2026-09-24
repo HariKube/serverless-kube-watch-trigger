@@ -253,8 +253,31 @@ type Delivery struct {
 	Retries uint8 `json:"retries,omitempty"`
 }
 
+// TriggerPhase describes the observed operational state of a Trigger.
+// +kubebuilder:validation:Enum=Running;Error
+type TriggerPhase string
+
+const (
+	// TriggerPhaseRunning indicates the trigger's watcher is established and
+	// the trigger is processing events.
+	TriggerPhaseRunning TriggerPhase = "Running"
+
+	// TriggerPhaseError indicates the trigger last failed to run; errorReason
+	// and errorTime describe the failure.
+	TriggerPhaseError TriggerPhase = "Error"
+)
+
 // TriggerStatus defines the observed state of Trigger.
 type TriggerStatus struct {
+	// Phase is the observed operational state of the trigger. It is reported as
+	// Running whenever a watcher is established and set to Error whenever the
+	// watcher collapses or the trigger cannot be initialized. errorReason and
+	// errorTime retain the last recorded failure across an automatic recovery
+	// restart, so a trigger that recovered reports Running again while keeping
+	// the failure detail for diagnostics.
+	// +kubebuilder:validation:Optional
+	Phase TriggerPhase `json:"phase,omitempty"`
+
 	ErrorTime            metav1.Time `json:"errorTime,omitempty"`
 	ErrorReason          string      `json:"errorReason,omitempty"`
 	ErrorResourceVersion string      `json:"errorResourceVersion,omitempty"`

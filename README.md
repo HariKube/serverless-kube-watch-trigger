@@ -145,9 +145,9 @@ spec:
 
 One of:
 
-* `url.static` – fixed URL
-* `url.template` – URL template with Go template syntax
-* `url.service` – service name + optional URI strategy (static/template)
+* `url.static` - fixed URL
+* `url.template` - URL template with Go template syntax
+* `url.service` - service name + optional URI strategy (static/template)
 
 `method` defines the HTTP verb (default: `POST`).
 

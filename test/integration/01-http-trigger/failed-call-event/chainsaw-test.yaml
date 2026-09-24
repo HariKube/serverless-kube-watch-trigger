@@ -1,0 +1,162 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: failed-http-call-event
+spec:
+  timeouts:
+    exec: 3m
+  skipDelete: true
+  namespace: http-trigger-failure
+  steps:
+  - name: Deploy failing HTTP endpoint
+    try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: failing-http-server
+            namespace: http-trigger-failure
+          data:
+            server.py: |
+              from http.server import BaseHTTPRequestHandler, HTTPServer
+
+              class Handler(BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      self.send_response(500)
+                      self.send_header("Content-Type", "text/plain")
+                      self.end_headers()
+                      self.wfile.write(b"failure")
+
+                  def log_message(self, format, *args):
+                      return
+
+              HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    - apply:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: failing-http-server
+            namespace: http-trigger-failure
+            labels:
+              app: failing-http-server
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: failing-http-server
+            template:
+              metadata:
+                labels:
+                  app: failing-http-server
+              spec:
+                containers:
+                - name: server
+                  image: python:3.12-alpine
+                  command:
+                  - python
+                  - /app/server.py
+                  ports:
+                  - containerPort: 8080
+                  volumeMounts:
+                  - name: script
+                    mountPath: /app
+                volumes:
+                - name: script
+                  configMap:
+                    name: failing-http-server
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: failing-http-server
+            namespace: http-trigger-failure
+          spec:
+            selector:
+              app: failing-http-server
+            ports:
+            - name: http
+              port: 8080
+              targetPort: 8080
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: failing-http-server
+            namespace: http-trigger-failure
+          status:
+            readyReplicas: 1
+  - name: Create HTTPTrigger
+    try:
+    - apply:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: failing-httptrigger-example
+            namespace: http-trigger-failure
+          spec:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+            - http-trigger-failure
+            labelSelectors:
+            - watch-e2e-http-fail=true
+            eventTypes:
+            - ADDED
+            url:
+              service:
+                name: failing-http-server
+                namespace: http-trigger-failure
+                portName: http
+                uri:
+                  static: /fail
+            method: POST
+            delivery:
+              timeout: 2s
+              retries: 1
+    - assert:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: failing-httptrigger-example
+            namespace: http-trigger-failure
+  - name: Create watched ConfigMap
+    try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: failing-http-source
+            namespace: http-trigger-failure
+            labels:
+              watch-e2e-http-fail: "true"
+          data:
+            key: value
+  - name: Validate failure status and event
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          for _ in $(seq 1 40); do
+            ERROR_REASON="$(kubectl get httptrigger failing-httptrigger-example -n http-trigger-failure -o jsonpath='{.status.errorReason}' || true)"
+            EVENT_OUTPUT="$(kubectl get events -n http-trigger-failure \
+              --field-selector involvedObject.kind=HTTPTrigger,involvedObject.name=failing-httptrigger-example,reason=TriggerCallFailed \
+              -o jsonpath='{range .items[*]}{.type}{"|"}{.reason}{"|"}{.message}{"\n"}{end}')"
+            if [ -n "$ERROR_REASON" ] && printf '%s' "$EVENT_OUTPUT" | grep -q 'Warning|TriggerCallFailed'; then
+              printf '%s\n' "$ERROR_REASON" | grep 'status code is 500'
+              printf '%s\n' "$EVENT_OUTPUT" | grep 'status code is 500'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "expected failure status or event not found"
+          kubectl get httptrigger failing-httptrigger-example -n http-trigger-failure -o yaml
+          kubectl get events -n http-trigger-failure --sort-by=.lastTimestamp
+          exit 1

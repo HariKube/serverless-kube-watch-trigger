@@ -15,6 +15,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .status.errorTime
       name: ErrorTime
       type: string
@@ -399,6 +402,18 @@ spec:
               lastGeneration:
                 format: int64
                 type: integer
+              phase:
+                description: |-
+                  Phase is the observed operational state of the trigger. It is reported as
+                  Running whenever a watcher is established and set to Error whenever the
+                  watcher collapses or the trigger cannot be initialized. errorReason and
+                  errorTime retain the last recorded failure across an automatic recovery
+                  restart, so a trigger that recovered reports Running again while keeping
+                  the failure detail for diagnostics.
+                enum:
+                - Running
+                - Error
+                type: string
             type: object
         type: object
     served: true

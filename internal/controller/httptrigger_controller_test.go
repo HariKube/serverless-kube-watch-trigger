@@ -372,6 +372,8 @@ var _ = Describe("HTTPTrigger Controller", func() {
 				ctx:                 context.Background(),
 				runningTriggersLock: sync.Mutex{},
 				runningTriggers:     map[string]func(){},
+				triggerLocksLock:    sync.Mutex{},
+				triggerLocks:        map[string]*sync.Mutex{},
 			}
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{

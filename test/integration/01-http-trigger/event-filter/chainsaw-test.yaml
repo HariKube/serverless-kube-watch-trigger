@@ -95,7 +95,7 @@ spec:
             namespace: event-filter
     - sleep:
         duration: 1s
-  - name: Create non-matching ConfigMap – should NOT trigger webhook
+  - name: Create non-matching ConfigMap - should NOT trigger webhook
     try:
     - apply:
         resource:
@@ -111,7 +111,7 @@ spec:
     - script:
         # Nginx access log must NOT contain any hits from the trigger.
         content: "! kubectl logs -n default -l app=nginx-filter | grep 'Go-http-client/1.1'"
-  - name: Create matching ConfigMap – should trigger webhook
+  - name: Create matching ConfigMap - should trigger webhook
     try:
     - apply:
         resource:

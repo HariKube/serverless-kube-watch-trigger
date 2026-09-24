@@ -17,21 +17,16 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
-	"maps"
 	"net/http"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,16 +35,13 @@ import (
 
 	"github.com/facette/natsort"
 	"github.com/go-logr/logr"
-	"github.com/go-openapi/inflect"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,10 +70,50 @@ type HTTPTriggerReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	DynamicClient *dynamic.DynamicClient
+	Recorder      record.EventRecorder
 
 	ctx                 context.Context
 	runningTriggersLock sync.Mutex
 	runningTriggers     map[string]func()
+
+	triggerLocksLock sync.Mutex
+	triggerLocks     map[string]*sync.Mutex
+}
+
+// triggerLock returns the mutex that serializes reconcile work (session
+// creation, update and deletion) for a single trigger so a trigger can never
+// end up with more than one live watcher session. Reconciles for different
+// triggers hold different locks and therefore run in parallel instead of
+// serializing on the shared runningTriggersLock.
+func (r *HTTPTriggerReconciler) triggerLock(triggerRefName string) *sync.Mutex {
+	r.triggerLocksLock.Lock()
+	defer r.triggerLocksLock.Unlock()
+
+	if mu, ok := r.triggerLocks[triggerRefName]; ok {
+		return mu
+	}
+
+	mu := &sync.Mutex{}
+	r.triggerLocks[triggerRefName] = mu
+
+	return mu
+}
+
+// stopRunningTrigger cancels and removes the watcher session for a trigger.
+// runningTriggersLock must NOT be held by the caller.
+func (r *HTTPTriggerReconciler) stopRunningTrigger(triggerRefName string) {
+	r.runningTriggersLock.Lock()
+	defer r.runningTriggersLock.Unlock()
+
+	r.stopRunningTriggerLocked(triggerRefName)
+}
+
+// stopRunningTriggerLocked is stopRunningTrigger with runningTriggersLock held.
+func (r *HTTPTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) {
+	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
+		cancel()
+		delete(r.runningTriggers, triggerRefName)
+	}
 }
 
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers,verbs=get;list;watch;create;update;patch;delete
@@ -89,6 +121,7 @@ type HTTPTriggerReconciler struct {
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
 
 // +kubebuilder:rbac:groups="",resources=secrets;services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -102,9 +135,21 @@ type HTTPTriggerReconciler struct {
 func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", req.NamespacedName)
 
+	// Serialize reconcile work per trigger (never globally) so a trigger's
+	// watcher session is created/updated/deleted atomically while triggers
+	// reconcile against each other in parallel.
+	triggerMu := r.triggerLock(req.String())
+	triggerMu.Lock()
+	defer triggerMu.Unlock()
+
 	trigger := triggersv1.HTTPTrigger{}
 	if err := r.Get(ctx, req.NamespacedName, &trigger); err != nil {
 		if apierrors.IsNotFound(err) {
+			// The trigger was deleted without a finalizer and is already gone.
+			// Make sure its watcher session is cancelled and the map entry is
+			// removed so it cannot keep delivering events as a zombie.
+			r.stopRunningTrigger(req.String())
+
 			return ctrl.Result{}, nil
 		}
 
@@ -113,46 +158,61 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	r.runningTriggersLock.Lock()
-	defer r.runningTriggersLock.Unlock()
-
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
 
-		if cancel, ok := r.runningTriggers[req.String()]; ok {
-			cancel()
-		}
+		r.stopRunningTrigger(req.String())
 
 		return ctrl.Result{}, nil
 	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
 	} else {
-		if trigger.Status.ErrorTime.IsZero() && trigger.Status.LastGeneration == trigger.Generation {
+		if trigger.Status.Phase == triggersv1.TriggerPhaseRunning && trigger.Status.LastGeneration == trigger.Generation {
 			return ctrl.Result{}, nil
 		}
 
 		logger.Info("Trigger updated")
 	}
 
-	if cancel, ok := r.runningTriggers[req.String()]; ok {
-		cancel()
+	r.stopRunningTrigger(req.String())
 
-		return ctrl.Result{}, nil
-	}
+	recoveryRestart := !trigger.Status.ErrorTime.IsZero() &&
+		trigger.Status.LastGeneration == trigger.Generation
 
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
-	patchedTrigger.Status.ErrorTime = metav1.Time{}
 
 	if err := r.createTrigger(req.String(), &trigger); err != nil {
-		if !errors.Is(err, ErrInvalidTriggerContent) {
+		permanent := errors.Is(err, ErrInvalidTriggerContent)
+		if !permanent {
 			logger.Error(err, "Trigger initialization failed")
+		}
+
+		patchedTrigger.Status.Phase = triggersv1.TriggerPhaseError
+		patchedTrigger.Status.ErrorTime = metav1.Now()
+		patchedTrigger.Status.ErrorReason = err.Error()
+		patchedTrigger.Status.ErrorResourceVersion = "0"
+
+		if err := r.Status().Patch(ctx, patchedTrigger, client.MergeFrom(&trigger)); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+
+			logger.Error(err, "Trigger status update failed")
 
 			return ctrl.Result{}, err
 		}
 
-		patchedTrigger.Status.ErrorReason = err.Error()
-	} else {
+		if permanent {
+			return ctrl.Result{}, nil
+		}
+
+		return ctrl.Result{}, err
+	}
+
+	patchedTrigger.Status.Phase = triggersv1.TriggerPhaseRunning
+	if !recoveryRestart {
+		patchedTrigger.Status.ErrorTime = metav1.Time{}
 		patchedTrigger.Status.ErrorReason = ""
 		patchedTrigger.Status.ErrorResourceVersion = "0"
 	}
@@ -172,312 +232,198 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 //nolint:gocyclo
 func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
-	resourceVersion := "0"
-	if trigger.Status.ErrorResourceVersion != "" {
-		resourceVersion = trigger.Status.ErrorResourceVersion
-	}
+	resourceVersion := triggerResourceVersion(trigger.Status.ErrorResourceVersion)
+	gvr, gvk := buildTriggerResourceInfo(trigger.Spec.Resource)
+	eventTypes := buildTriggerEventTypes(trigger.Spec.EventType)
 
-	apiParts := strings.Split(trigger.Spec.Resource.APIVersion, "/")
-	if len(apiParts) == 1 {
-		apiParts = append(apiParts, apiParts[0])
-		apiParts[0] = ""
-	}
-	gvr := schema.GroupVersionResource{
-		Group:    apiParts[0],
-		Version:  apiParts[1],
-		Resource: inflect.Pluralize(strings.ToLower(trigger.Spec.Resource.Kind)),
-	}
-	gvk := schema.GroupVersionKind{
-		Group:   apiParts[0],
-		Version: apiParts[1],
-		Kind:    trigger.Spec.Resource.Kind,
-	}
-
-	triggerEventTypes := slices.Clone(trigger.Spec.EventType)
-	if len(triggerEventTypes) == 0 {
-		triggerEventTypes = append(triggerEventTypes,
-			triggersv1.EventTypeAdded,
-			triggersv1.EventTypeModified,
-			triggersv1.EventTypeDeleted,
-		)
-	}
-	eventTypes := map[string]bool{}
-	for _, eventType := range triggerEventTypes {
-		eventTypes[string(eventType)] = true
-	}
-
-	compiedTemapltes := map[string]*template.Template{}
-	if trigger.Spec.EventFilter != "" {
-		renderer, err := template.New("filter_template").Parse(fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter))
-		if err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse filter template"))
-		}
-		compiedTemapltes["filter_template"] = renderer
-	}
-	if trigger.Spec.URL.Template != nil {
-		renderer, err := template.New("url_template").Parse(*trigger.Spec.URL.Template)
-		if err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse url template"))
-		}
-		compiedTemapltes["url_template"] = renderer
-	}
-	if trigger.Spec.URL.Service != nil && trigger.Spec.URL.Service.URI.Template != nil {
-		renderer, err := template.New("uri_template").Parse(*trigger.Spec.URL.Service.URI.Template)
-		if err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse uri template"))
-		}
-		compiedTemapltes["uri_template"] = renderer
+	compiledTemplates := map[string]*template.Template{}
+	if err := compileSharedTemplates(compiledTemplates, trigger.Spec.EventFilter, trigger.Spec.URL, trigger.Spec.Headers); err != nil {
+		return err
 	}
 	if trigger.Spec.Body.Template != "" {
-		renderer, err := template.New("body_template").Funcs(template.FuncMap{
-			"toJson": toJson,
-		}).Parse(trigger.Spec.Body.Template)
-		if err != nil {
+		if err := addCompiledTemplate(compiledTemplates, "body_template", trigger.Spec.Body.Template, template.FuncMap{"toJson": toJson}); err != nil {
 			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
 		}
-		compiedTemapltes["body_template"] = renderer
-	}
-	for k, v := range trigger.Spec.Headers.Template {
-		renderer, err := template.New("header_template_" + k).Parse(v)
-		if err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, fmt.Errorf("failed to parse header template: %s", k))
-		}
-		compiedTemapltes["header_template_"+k] = renderer
 	}
 
 	depFetchCtx, depFetchCancel := context.WithTimeout(r.ctx, time.Minute)
 	defer depFetchCancel()
 
-	var serviceScheme string
-	var servicePort int32
-	if trigger.Spec.URL.Service != nil {
-		endpointService := corev1.Service{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Spec.URL.Service.Namespace,
-			Name:      trigger.Spec.URL.Service.Name,
-		}, &endpointService); err != nil {
-			return err
-		}
-
-		serviceScheme = trigger.Spec.URL.Service.Scheme
-		if serviceScheme == "" {
-			serviceScheme = "http"
-		}
-
-		servicePort = 0
-		for _, port := range endpointService.Spec.Ports {
-			if port.Name == trigger.Spec.URL.Service.PortName {
-				servicePort = port.Port
-			}
-		}
-		if servicePort == 0 {
-			servicePort = endpointService.Spec.Ports[0].Port
-		}
+	serviceScheme, servicePort, err := resolveServiceEndpoint(depFetchCtx, r, trigger.Spec.URL.Service)
+	if err != nil {
+		return err
 	}
 
 	var userAuthPassword string
 	if trigger.Spec.Auth.BasicAuth != nil {
-		passwordSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Auth.BasicAuth.PasswordRef.Name,
-		}, &passwordSecret); err != nil {
+		userAuthPassword, err = loadSecretString(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.BasicAuth.PasswordRef)
+		if err != nil {
 			return err
 		}
-		userAuthPassword = string(passwordSecret.Data[trigger.Spec.Auth.BasicAuth.PasswordRef.Key])
 	}
 
-	headerSecrets := map[string]string{}
-	for k, v := range trigger.Spec.Headers.FromSecretRef {
-		headerSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      v.Name,
-		}, &headerSecret); err != nil {
-			return err
-		}
-		headerSecrets[k] = string(headerSecret.Data[v.Key])
+	headerSecrets, err := loadHeaderSecrets(depFetchCtx, r, trigger.Namespace, trigger.Spec.Headers.FromSecretRef)
+	if err != nil {
+		return err
 	}
 
 	var signature []byte
 	if trigger.Spec.Body.Signature.KeySecretRef.Name != "" {
-		signatureSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Body.Signature.KeySecretRef.Name,
-		}, &signatureSecret); err != nil {
-			return err
-		}
-		signature = signatureSecret.Data[trigger.Spec.Body.Signature.KeySecretRef.Key]
-	}
-
-	httpTransport := &http.Transport{
-		MaxIdleConns:          int(trigger.Spec.Concurrency * 2),
-		MaxIdleConnsPerHost:   int(trigger.Spec.Concurrency),
-		MaxConnsPerHost:       int(trigger.Spec.Concurrency * 2),
-		IdleConnTimeout:       time.Minute,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-	if trigger.Spec.Auth.TLS != nil {
-		httpTransport.TLSHandshakeTimeout = 10 * time.Second
-
-		caSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Auth.TLS.CARef.Name,
-		}, &caSecret); err != nil {
-			return err
-		}
-
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM(caSecret.Data[trigger.Spec.Auth.TLS.CARef.Key]); !ok {
-			return fmt.Errorf("error appending CA cert to pool")
-		}
-
-		certSecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Auth.TLS.CertRef.Name,
-		}, &certSecret); err != nil {
-			return err
-		}
-
-		keySecret := corev1.Secret{}
-		if err := r.Get(depFetchCtx, types.NamespacedName{
-			Namespace: trigger.Namespace,
-			Name:      trigger.Spec.Auth.TLS.KeyRef.Name,
-		}, &keySecret); err != nil {
-			return err
-		}
-
-		clientCert, err := tls.X509KeyPair(
-			certSecret.Data[trigger.Spec.Auth.TLS.CertRef.Key],
-			keySecret.Data[trigger.Spec.Auth.TLS.KeyRef.Key],
-		)
+		signature, err = loadSecretBytes(depFetchCtx, r, trigger.Namespace, trigger.Spec.Body.Signature.KeySecretRef)
 		if err != nil {
 			return err
 		}
-
-		httpTransport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: trigger.Spec.Auth.TLS.InsecureSkipVerify,
-			RootCAs:            caCertPool,
-			Certificates:       []tls.Certificate{clientCert},
-		}
 	}
-	httpClient := &http.Client{
-		Timeout:   trigger.Spec.Delivery.Timeout.Duration,
-		Transport: httpTransport,
+
+	concurrency := normalizeConcurrency(trigger.Spec.Concurrency)
+	httpClient, err := newTriggerHTTPClient(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.TLS, trigger.Spec.Delivery.Timeout.Duration, concurrency)
+	if err != nil {
+		return err
 	}
 
 	resourceClient := r.DynamicClient.Resource(gvr)
-	watchClients := []dynamic.ResourceInterface{}
-	if len(trigger.Spec.Namespaces) != 0 {
-		for _, namespace := range trigger.Spec.Namespaces {
-			watchClients = append(watchClients, resourceClient.Namespace(namespace))
-		}
-	} else {
-		watchClients = append(watchClients, resourceClient)
-	}
+	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
 
 	ctx, cancel := context.WithCancel(r.ctx)
+
+	r.runningTriggersLock.Lock()
 	r.runningTriggers[triggerRefName] = cancel
+	r.runningTriggersLock.Unlock()
 
-	listOpts := metav1.ListOptions{
-		ResourceVersion:      resourceVersion,
-		TimeoutSeconds:       ptr.To(int64(60)),
-		Watch:                true,
-		AllowWatchBookmarks:  true,
-		SendInitialEvents:    ptr.To(trigger.Spec.SendInitialEvents),
-		ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
-		LabelSelector:        strings.Join(trigger.Spec.LabelSelector, ","),
-		FieldSelector:        strings.Join(trigger.Spec.FieldSelector, ","),
+	listOpts := buildWatcherListOptions(resourceVersion, trigger.Spec.SendInitialEvents, trigger.Spec.LabelSelector, trigger.Spec.FieldSelector)
+
+	watchers, err := openWatchers(ctx, watchClients, listOpts)
+	if err != nil {
+		r.stopRunningTrigger(triggerRefName)
+
+		return err
 	}
-
-	watchers := []watch.Interface{}
-	for _, watchClient := range watchClients {
-		watcher, err := watchClient.Watch(ctx, listOpts)
-		if err != nil {
-			for _, watcher := range watchers {
-				watcher.Stop()
-			}
-
-			cancel()
-
-			return err
-		}
-
-		watchers = append(watchers, watcher)
-	}
-
-	cases := make([]reflect.SelectCase, len(watchers))
-	for i, w := range watchers {
-		cases[i] = reflect.SelectCase{
-			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(w.ResultChan()),
-		}
-	}
-	cases = append(cases, reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(ctx.Done()),
-	})
 
 	lastResourceVersion := atomic.Pointer[string]{}
 	lastResourceVersion.Store(ptr.To("0"))
 
-	handleError := func(err error, logger logr.Logger) {
-		r.runningTriggersLock.Lock()
-		defer r.runningTriggersLock.Unlock()
+	var (
+		watchersMu      sync.Mutex
+		sessionGen      uint64
+		sessionWatchers []watch.Interface
+	)
+	sessionWatchers = watchers
 
-		if cancel, ok := r.runningTriggers[triggerRefName]; ok {
-			logger.Error(err, "Watcher closed")
+	// resumeListOptions builds the options used to transparently re-open the
+	// watch stream after the server closes it (see TimeoutSeconds in
+	// buildWatcherListOptions), resuming from the last seen resourceVersion.
+	resumeListOptions := func() metav1.ListOptions {
+		return buildWatcherListOptions(*lastResourceVersion.Load(), false, trigger.Spec.LabelSelector, trigger.Spec.FieldSelector)
+	}
 
-			go func() {
-				patchedTrigger := trigger.DeepCopy()
-				patchedTrigger.Status.ErrorTime = metav1.Now()
-				patchedTrigger.Status.ErrorReason = err.Error()
-				patchedTrigger.Status.ErrorResourceVersion = *lastResourceVersion.Load()
-
-				for {
-					patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
-					if err := r.Status().Patch(patchCtx, patchedTrigger, client.MergeFrom(trigger)); err != nil && !apierrors.IsNotFound(err) {
-						logger.Error(err, "Trigger status update failed")
-
-						patchCancel()
-
-						<-time.After(time.Second)
-
-						continue
-					}
-
-					logger.Info("Trigger status successfully updated")
-
-					patchCancel()
-
-					break
-				}
-			}()
-
-			cancel()
-			delete(r.runningTriggers, triggerRefName)
-
-			for _, w := range watchers {
-				w.Stop()
-			}
+	reconnect := func(expectedGen uint64) error {
+		reopened, err := openWatchers(ctx, watchClients, resumeListOptions())
+		if err != nil {
+			return err
 		}
+
+		watchersMu.Lock()
+		defer watchersMu.Unlock()
+
+		if sessionGen != expectedGen {
+			stopWatchers(reopened)
+
+			return nil // another worker already reconnected
+		}
+
+		sessionWatchers = reopened
+		sessionGen++
+
+		return nil
+	}
+
+	handleError := func(err error, logger logr.Logger) {
+		handleTriggerWatcherError(
+			r.ctx,
+			err,
+			logger,
+			r.Recorder,
+			trigger,
+			triggerRefName,
+			*lastResourceVersion.Load(),
+			&r.runningTriggersLock,
+			r.runningTriggers,
+			ctx.Done(),
+			func() {
+				watchersMu.Lock()
+				active := sessionWatchers
+				watchersMu.Unlock()
+
+				stopWatchers(active)
+			},
+			func(patchCtx context.Context, errorTime metav1.Time, errorReason, errorResourceVersion string) (bool, error) {
+				latest := &triggersv1.HTTPTrigger{}
+				if err := r.Get(patchCtx, client.ObjectKeyFromObject(trigger), latest); err != nil {
+					return false, err
+				}
+
+				if latest.Generation != trigger.Generation || latest.Status.Phase == triggersv1.TriggerPhaseError {
+					return false, nil
+				}
+
+				patched := latest.DeepCopy()
+				patched.Status.Phase = triggersv1.TriggerPhaseError
+				patched.Status.ErrorTime = errorTime
+				patched.Status.ErrorReason = errorReason
+				patched.Status.ErrorResourceVersion = errorResourceVersion
+
+				return true, r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
+			},
+		)
 	}
 
 	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
 	logger.Info("Watcher started")
 
+	const (
+		minReconnectBackoff = time.Second
+		maxReconnectBackoff = 30 * time.Second
+	)
+
 	for i := 1; i <= int(trigger.Spec.Concurrency); i++ {
 		go func() {
-			for {
-				_, data, ok := reflect.Select(cases)
-				if !ok {
-					handleError(fmt.Errorf("closed channel"), logger)
+			reconnectBackoff := minReconnectBackoff
 
-					return
+			for {
+				watchersMu.Lock()
+				activeWatchers := sessionWatchers
+				activeGen := sessionGen
+				watchersMu.Unlock()
+
+				_, data, ok := reflect.Select(buildWatcherSelectCases(activeWatchers, ctx.Done()))
+				if !ok {
+					stopWatchers(activeWatchers)
+
+					if ctx.Err() != nil {
+						return
+					}
+
+					logger.V(1).Info("Watch stream closed, reconnecting", "gen", activeGen, "lastResourceVersion", *lastResourceVersion.Load())
+
+					if err := reconnect(activeGen); err != nil {
+						logger.Error(err, "Reconnect failed", "gen", activeGen)
+						handleError(err, logger)
+
+						return
+					}
+
+					logger.V(1).Info("Watch stream reconnected", "gen", activeGen)
+
+					<-time.After(reconnectBackoff)
+
+					if reconnectBackoff < maxReconnectBackoff {
+						reconnectBackoff *= 2
+					}
+
+					continue
 				}
+
+				reconnectBackoff = minReconnectBackoff
 
 				eventVal := data.Interface()
 				event := eventVal.(watch.Event)
@@ -513,95 +459,58 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 					logger.Info("Received bookmark event", "resourceVersion", bookmark.GetResourceVersion())
 
+					for {
+						rv := bookmark.GetResourceVersion()
+						lrv := lastResourceVersion.Load()
+
+						if natsort.Compare(rv, *lrv) {
+							break
+						} else if lastResourceVersion.CompareAndSwap(lrv, &rv) {
+							break
+						}
+					}
+
 					continue
 				}
 
 				if trigger.Spec.EventFilter != "" {
-					var renderedMatch bytes.Buffer
-					if err := compiedTemapltes["filter_template"].Execute(&renderedMatch, unstructuredObj.Object); err != nil {
+					renderedMatch, err := renderTemplateToString(compiledTemplates, filterTemplateName, unstructuredObj.Object)
+					if err != nil {
 						handleError(err, logger)
 
 						return
 					}
-					if renderedMatch.String() != trueString {
+					if renderedMatch != trueString {
 						continue
 					}
 				}
 
-				var url string
-				switch {
-				case trigger.Spec.URL.Static != nil:
-					url = *trigger.Spec.URL.Static
-				case trigger.Spec.URL.Template != nil:
-					var renderedURL bytes.Buffer
-					if err := compiedTemapltes["url_template"].Execute(&renderedURL, unstructuredObj.Object); err != nil {
-						handleError(err, logger)
-
-						return
-					}
-					url = renderedURL.String()
-				case trigger.Spec.URL.Service != nil:
-					var uri string
-					switch {
-					case trigger.Spec.URL.Service.URI.Static != nil:
-						uri = *trigger.Spec.URL.Service.URI.Static
-					case trigger.Spec.URL.Service.URI.Template != nil:
-						var renderedURI bytes.Buffer
-						if err := compiedTemapltes["uri_template"].Execute(&renderedURI, unstructuredObj.Object); err != nil {
-							handleError(err, logger)
-
-							return
-						}
-					default:
-						handleError(fmt.Errorf("missing URI generation strategy"), logger)
-
-						return
-					}
-
-					url = fmt.Sprintf("%s://%s.%s:%d/%s",
-						serviceScheme,
-						trigger.Spec.URL.Service.Name,
-						trigger.Spec.URL.Service.Namespace,
-						servicePort,
-						strings.TrimPrefix(uri, "/"),
-					)
-				default:
-					// TODO Ingress, gateway
-					handleError(fmt.Errorf("missing URL generation strategy"), logger)
+				url, err := buildTriggerURL(trigger.Spec.URL, compiledTemplates, unstructuredObj.Object, serviceScheme, servicePort)
+				if err != nil {
+					handleError(err, logger)
 
 					return
 				}
 
 				body := ""
 				if trigger.Spec.Body.Template != "" {
-					var renderedBody bytes.Buffer
-					if err := compiedTemapltes["body_template"].Execute(&renderedBody, unstructuredObj.Object); err != nil {
+					body, err = renderTemplateToString(compiledTemplates, "body_template", unstructuredObj.Object)
+					if err != nil {
 						handleError(err, logger)
 
 						return
 					}
-					body = renderedBody.String()
 				}
 
 				contentType := "application/json"
 				if trigger.Spec.Body.ContentType != "" {
 					contentType = trigger.Spec.Body.ContentType
 				}
-				headers := map[string]string{
-					"Content-Type": contentType,
-				}
-				maps.Copy(headers, trigger.Spec.Headers.Static)
-				for k := range trigger.Spec.Headers.Template {
-					var renderedHeader bytes.Buffer
-					if err := compiedTemapltes["header_template_"+k].Execute(&renderedHeader, unstructuredObj.Object); err != nil {
-						handleError(err, logger)
+				headers, err := buildTriggerHeaders(contentType, trigger.Spec.Headers, headerSecrets, compiledTemplates, unstructuredObj.Object)
+				if err != nil {
+					handleError(err, logger)
 
-						return
-					}
-					headers[k] = renderedHeader.String()
-				}
-				for k := range trigger.Spec.Headers.FromSecretRef {
-					headers[k] = headerSecrets[k]
+					return
 				}
 
 				switch {
@@ -623,13 +532,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 				var retryErr error
 				for i := 0; i <= int(trigger.Spec.Delivery.Retries); i++ {
-					timeout := trigger.Spec.Delivery.Timeout.Duration
-					if timeout == 0 {
-						timeout = 10 * time.Second
-					}
-					reqCtx, reqCancel := context.WithTimeout(ctx, timeout)
+					reqCtx, reqCancel := context.WithTimeout(ctx, normalizeHTTPTimeout(trigger.Spec.Delivery.Timeout.Duration))
 
-					req, err := http.NewRequestWithContext(reqCtx, string(trigger.Spec.Method), url, strings.NewReader(body))
+					req, err := http.NewRequestWithContext(reqCtx, methodOrDefault(trigger.Spec.Method), url, strings.NewReader(body))
 					if err != nil {
 						handleError(err, logger)
 						reqCancel()
@@ -703,6 +608,8 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				}
 
 				if retryErr != nil {
+					metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
+					emitTriggerCallFailureEvent(r.Recorder, trigger, triggerRefName, methodOrDefault(trigger.Spec.Method), url, event.Type, metadata, retryErr)
 					handleError(fmt.Errorf("retry failed: %w", retryErr), logger)
 
 					return
@@ -715,9 +622,6 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 }
 
 func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
-	r.runningTriggersLock.Lock()
-	defer r.runningTriggersLock.Unlock()
-
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 
@@ -727,12 +631,26 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 	}
 
 	for _, trigger := range existingTriggers.Items {
-		if err := r.createTrigger(trigger.Namespace+"/"+trigger.Name, &trigger); err != nil {
-			for _, tc := range r.runningTriggers {
-				tc()
-			}
+		refName := trigger.Namespace + "/" + trigger.Name
 
-			return err
+		triggerMu := r.triggerLock(refName)
+		triggerMu.Lock()
+		initErr := r.createTrigger(refName, &trigger)
+		triggerMu.Unlock()
+
+		if initErr != nil {
+			// Cancel every session started so far: a partially-initialized
+			// operator must not leave zombie watchers behind.
+			r.runningTriggersLock.Lock()
+			for runningRef := range r.runningTriggers {
+				if cancelFn, ok := r.runningTriggers[runningRef]; ok {
+					cancelFn()
+					delete(r.runningTriggers, runningRef)
+				}
+			}
+			r.runningTriggersLock.Unlock()
+
+			return initErr
 		}
 	}
 
@@ -742,8 +660,11 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 // SetupWithManager sets up the controller with the Manager.
 func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, maxConcurrentReconciles int, wg *sync.WaitGroup) error {
 	r.ctx = ctx
+	r.Recorder = mgr.GetEventRecorderFor("httptrigger-controller")
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
+	r.triggerLocksLock = sync.Mutex{}
+	r.triggerLocks = map[string]*sync.Mutex{}
 
 	wg.Add(1)
 	go func() {
@@ -751,20 +672,36 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 
 		<-ctx.Done()
 
+		// Cancel every running watcher session and remove its map entry so the
+		// goroutines watching it can terminate promptly.
 		r.runningTriggersLock.Lock()
-		for _, c := range r.runningTriggers {
-			c()
+		for refName := range r.runningTriggers {
+			r.stopRunningTriggerLocked(refName)
 		}
 		r.runningTriggersLock.Unlock()
 
+		// Wait for the sessions to drain so in-flight status writes and watch
+		// loops settle before the manager stops. The wait is bounded so
+		// shutdown never hangs even if a session is stuck.
+		drainStart := time.Now()
 		for {
 			r.runningTriggersLock.Lock()
 			running := len(r.runningTriggers)
 			r.runningTriggersLock.Unlock()
 
 			if running == 0 {
-				break
+				return
 			}
+
+			if time.Since(drainStart) >= 30*time.Second {
+				r.runningTriggersLock.Lock()
+				r.runningTriggers = map[string]func(){}
+				r.runningTriggersLock.Unlock()
+
+				return
+			}
+
+			time.Sleep(50 * time.Millisecond)
 		}
 	}()
 

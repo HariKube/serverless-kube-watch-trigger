@@ -2,15 +2,8 @@
 TAG ?= $(shell git describe --tags --abbrev=0)
 IMG ?= harikube/serverless-kube-watch-trigger:$(TAG)
 
-DIFF = $(shell git rev-list refs/tags/$(TAG)..HEAD --count)
-ifneq ($(DIFF),)
-ifneq ($(DIFF), 0)
-IMG := $(IMG)-$(DIFF)
-endif
-endif
-
 ifneq ($(shell git status -s | wc -l), 0)
-IMG := $(IMG)-dirty
+IMG := $(IMG)-$(shell git diff -- . ':!config/manager/kustomization.yaml' | md5sum | cut -c1-5)
 endif
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
