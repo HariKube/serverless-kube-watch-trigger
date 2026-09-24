@@ -3,8 +3,10 @@ TAG ?= $(shell git describe --tags --abbrev=0)
 IMG ?= harikube/serverless-kube-watch-trigger:$(TAG)
 
 DIFF = $(shell git rev-list refs/tags/$(TAG)..HEAD --count)
+ifneq ($(DIFF),)
 ifneq ($(DIFF), 0)
 IMG := $(IMG)-$(DIFF)
+endif
 endif
 
 ifneq ($(shell git status -s | wc -l), 0)
