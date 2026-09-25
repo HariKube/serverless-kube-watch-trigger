@@ -11,13 +11,7 @@ spec:
   - name: Build operator
     try:
     - script:
-        content: make -C ../../../.. package docker-build docker-load
-  - name: Deploy operator
-    try:
-    - script:
-        content: |
-          TAG="$(git -C ../../../../ describe --tags --abbrev=0)"
-          kubectl apply -f "../../../../package/bundle-${TAG}.yaml"
+        content: make -C ../../../.. package docker-build docker-load deploy
   - name: Configure extra RBAC
     try:
     - assert:
