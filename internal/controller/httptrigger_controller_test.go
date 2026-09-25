@@ -63,6 +63,8 @@ var _ = Describe("HTTPTrigger Controller", func() {
 		BeforeEach(func() {
 		})
 
+		var httpReconciler *HTTPTriggerReconciler
+
 		AfterEach(func() {
 			resource := &triggersv1.HTTPTrigger{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
@@ -70,6 +72,14 @@ var _ = Describe("HTTPTrigger Controller", func() {
 
 			By("Cleanup the specific resource instance HTTPTrigger")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			// Stop the watcher session started by the spec so no watch stream
+			// stays open against the apiserver during AfterSuite teardown.
+			// Leaving the session running leaves the apiserver with an
+			// unresolved watch, which can block its graceful shutdown.
+			if httpReconciler != nil {
+				httpReconciler.stopRunningTrigger(typeNamespacedName.String())
+			}
 		})
 		It("should successfully reconcile the resource", func() {
 			By("creating the secret for the Kind HTTPTrigger")
@@ -364,7 +374,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 			}()
 
 			By("Reconciling the created resource")
-			controllerReconciler := &HTTPTriggerReconciler{
+			httpReconciler = &HTTPTriggerReconciler{
 				Client:        k8sClient,
 				DynamicClient: dynamicClient,
 				Scheme:        k8sClient.Scheme(),
@@ -376,7 +386,7 @@ var _ = Describe("HTTPTrigger Controller", func() {
 				triggerLocks:        map[string]*sync.Mutex{},
 			}
 
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+			_, err = httpReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())

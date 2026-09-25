@@ -89,19 +89,26 @@ spec:
         duration: 1s
   - name: Validate webhook trigger  
     try:
-    - patch:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: serverless-kube-watch-trigger-controller-manager 
-            namespace: serverless-kube-watch-trigger-system
-            labels:
-              trigger: change
-    - sleep:
-        duration: 5s
     - script:
-        content: kubectl logs -n simple -l app=nginx | grep 'Go-http-client/1.1'
+        content: |
+          set -euo pipefail
+          # Poll for the delivery: keep bumping a label on the operator's own
+          # deployment (an app/v1 Deployment watched by the trigger) until the
+          # webhook receives a request. This is resilient to the trigger's
+          # watch not being fully established yet, which would otherwise race
+          # a single patch and be missed permanently.
+          for i in $(seq 1 8); do
+            kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
+              -n serverless-kube-watch-trigger-system --type=merge \
+              -p "{\"metadata\":{\"labels\":{\"trigger\":\"change-$i\"}}}" >/dev/null 2>&1 || true
+            sleep 2
+            if kubectl logs -n simple -l app=nginx | grep -q 'Go-http-client/1.1'; then
+              exit 0
+            fi
+          done
+          echo "webhook was not triggered"
+          kubectl logs -n simple -l app=nginx | tail -20
+          exit 1
   - name: Cleanup test
     try:
     - delete:

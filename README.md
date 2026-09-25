@@ -194,6 +194,32 @@ Controls the request payload.
 | `timeout` | Maximum request duration (default: `10s`). |
 | `retries` | Number of retry attempts on failure.    |
 
+**Retry backoff.** Failed attempts are retried with an exponentially growing
+delay between attempts, starting at `1s` and doubling up to a `30s` cap. Every
+attempt also honors the per-request `timeout`.
+
+**Sustained-failure gate.** After `3` consecutive failed deliveries the operator
+activates a *delivery gate* that spaces out further deliveries to a failing
+endpoint, growing from `1s` up to `30s` per delivery. The gate is keyed per
+trigger and persists across watcher session restarts, so an endpoint that keeps
+failing is not hammered again by a recovering watcher replaying events. Any
+successful delivery resets the gate.
+
+**Observability.** Per-trigger delivery metrics are exported on the standard
+controller-runtime `/metrics` endpoint under the `serverless_kube_watch_trigger_delivery_*`
+family:
+
+| Metric                                        | Labels                                  | Meaning                                  |
+| --------------------------------------------- | --------------------------------------- | ---------------------------------------- |
+| `delivery_calls_total`                        | `kind`, `trigger`, `method`, `result`, `status_code` | Outgoing endpoint calls by outcome. |
+| `delivery_calls_failed_total`                 | `kind`, `trigger`, `method`, `reason`   | Failed calls (`request` vs `status`).    |
+| `delivery_call_duration_seconds`              | `kind`, `trigger`, `method`, `result`   | Call latency.                            |
+| `delivery_retries_total`                      | `kind`, `trigger`, `method`, `result`   | Retry attempts.                          |
+| `delivery_backoffs_total`                     | `kind`, `trigger`                       | Deliveries delayed by the failure gate.  |
+
+`kind` is `httptrigger` or `aitrigger` and `trigger` is the `namespace/name` of
+the trigger that produced the call.
+
 ---
 
 ### ⚡ Usage Tips

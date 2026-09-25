@@ -21,10 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"text/template"
@@ -73,6 +71,8 @@ type AITriggerReconciler struct {
 
 	triggerLocksLock sync.Mutex
 	triggerLocks     map[string]*sync.Mutex
+
+	deliveryGateRegistry
 }
 
 // triggerLock returns the mutex that serializes reconcile work (session
@@ -143,6 +143,7 @@ func (r *AITriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// Make sure its watcher session is cancelled and the map entry is
 			// removed so it cannot keep delivering events as a zombie.
 			r.stopRunningTrigger(req.String())
+			r.remove(req.String())
 
 			return ctrl.Result{}, nil
 		}
@@ -156,6 +157,7 @@ func (r *AITriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Info("Trigger deleted")
 
 		r.stopRunningTrigger(req.String())
+		r.remove(req.String())
 
 		return ctrl.Result{}, nil
 	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
@@ -286,6 +288,11 @@ func (r *AITriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 
 	resourceClient := r.DynamicClient.Resource(gvr)
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
+
+	// The delivery gate persists across watcher session restarts for this
+	// trigger, so sustained endpoint failures are spaced out even when the
+	// recovering watcher keeps replaying events.
+	deliveryGate := r.get(triggerRefName)
 
 	ctx, cancel := context.WithCancel(r.ctx)
 
@@ -545,61 +552,40 @@ func (r *AITriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 
 				method := methodOrDefault(trigger.Spec.Method)
 
-				var retryErr error
-				for i := 0; i <= int(trigger.Spec.Delivery.Retries); i++ {
-					reqCtx, reqCancel := context.WithTimeout(ctx, normalizeHTTPTimeout(trigger.Spec.Delivery.Timeout.Duration))
+				metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
 
-					req, err := http.NewRequestWithContext(reqCtx, method, url, strings.NewReader(body))
-					if err != nil {
-						handleError(err, logger)
-						reqCancel()
+				// Apply the sustained-failure backoff: once the endpoint has
+				// failed repeatedly, deliveries are spaced out so the endpoint
+				// is not hammered by a stream of events while it is down.
+				if delay := deliveryGate.delay(); delay > 0 {
+					recordDeliveryBackoff(kindAITrigger, triggerRefName)
+					logger.V(1).Info("Delaying delivery due to sustained endpoint failure", "name", metadata["name"], "namespace", metadata["namespace"], "delay", delay.String(), "consecutiveFailures", deliveryGate.consecutiveFailures())
 
+					if !sleepContext(ctx, delay) {
 						return
 					}
+				}
 
-					if trigger.Spec.Auth.BasicAuth != nil {
-						req.SetBasicAuth(trigger.Spec.Auth.BasicAuth.User, userAuthPassword)
-					}
-
-					for k, v := range headers {
-						req.Header.Add(k, v)
-					}
-
-					metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
-
-					resp, err := httpClient.Do(req)
-					if err != nil {
-						logger.Error(err, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
-
-						retryErr = err
-
-						reqCancel()
-
-						<-time.After(time.Second)
-
-						continue
-					} else if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-						if resp == nil {
-							retryErr = errors.New("missing response")
-						} else {
-							retryErr = fmt.Errorf("status code is %d", resp.StatusCode)
-						}
-
-						logger.Error(retryErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"])
-
-						reqCancel()
-						if err := resp.Body.Close(); err != nil {
-							handleError(err, logger)
-
-							return
-						}
-
-						<-time.After(time.Second)
-
-						continue
-					}
-
-					logger.Info("Endpoint successfully called", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "eventType", event.Type)
+				ok, retryErr := deliverPayload(
+					ctx,
+					logger,
+					httpClient,
+					kindAITrigger,
+					triggerRefName,
+					method,
+					url,
+					body,
+					headers,
+					trigger.Spec.Auth.BasicAuth,
+					userAuthPassword,
+					trigger.Spec.Delivery.Retries,
+					trigger.Spec.Delivery.Timeout.Duration,
+					retryBackoff{min: defaultRetryBackoffMin, max: defaultRetryBackoffMax},
+					string(event.Type),
+					metadata,
+				)
+				if ok {
+					deliveryGate.recordSuccess()
 
 					for {
 						rv := metadata["resourceVersion"].(string)
@@ -612,23 +598,14 @@ func (r *AITriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 						}
 					}
 
-					reqCancel()
-					if err := resp.Body.Close(); err != nil {
-						handleError(err, logger)
-
-						return
-					}
-
-					break
+					continue
 				}
 
-				if retryErr != nil {
-					metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
-					emitTriggerCallFailureEvent(r.Recorder, trigger, triggerRefName, methodOrDefault(trigger.Spec.Method), url, event.Type, metadata, retryErr)
-					handleError(fmt.Errorf("retry failed: %w", retryErr), logger)
+				deliveryGate.recordFailure()
+				emitTriggerCallFailureEvent(r.Recorder, trigger, triggerRefName, methodOrDefault(trigger.Spec.Method), url, event.Type, metadata, retryErr)
+				handleError(fmt.Errorf("retry failed: %w", retryErr), logger)
 
-					return
-				}
+				return
 			}
 		}()
 	}
@@ -680,12 +657,15 @@ func (r *AITriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 	r.runningTriggers = map[string]func(){}
 	r.triggerLocksLock = sync.Mutex{}
 	r.triggerLocks = map[string]*sync.Mutex{}
+	r.init()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
 		<-ctx.Done()
+
+		r.clear()
 
 		// Cancel every running watcher session and remove its map entry so the
 		// goroutines watching it can terminate promptly.

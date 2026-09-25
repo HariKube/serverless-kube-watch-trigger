@@ -5,6 +5,7 @@ metadata:
 spec:
   timeouts:
     exec: 3m
+    delete: 3m
   skipDelete: true
   namespace: http-trigger-failure
   steps:
@@ -59,6 +60,11 @@ spec:
                   - /app/server.py
                   ports:
                   - containerPort: 8080
+                  readinessProbe:
+                    tcpSocket:
+                      port: 8080
+                    initialDelaySeconds: 1
+                    periodSeconds: 2
                   volumeMounts:
                   - name: script
                     mountPath: /app
@@ -118,7 +124,7 @@ spec:
             method: POST
             delivery:
               timeout: 2s
-              retries: 1
+              retries: 3
     - assert:
         resource:
           apiVersion: triggers.harikube.info/v1
@@ -160,3 +166,10 @@ spec:
           kubectl get httptrigger failing-httptrigger-example -n http-trigger-failure -o yaml
           kubectl get events -n http-trigger-failure --sort-by=.lastTimestamp
           exit 1
+  - name: Cleanup test
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: http-trigger-failure
