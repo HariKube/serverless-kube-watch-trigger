@@ -30,8 +30,6 @@ When enabled, a replica must atomically write the annotation before starting tri
 
 An `HTTPTrigger` watches a target Kubernetes resource (e.g., `Deployment` or any other Custom Resources), filters events, and sends HTTP requests when matching events happen.
 
-An `AITrigger` uses the same watch/filter/retry mechanics, but sends an OpenAI-compatible chat-completions request to an AI provider or gateway whenever a matching event arrives.
-
 A `PiTrigger` uses the same watch/filter/retry mechanics, but creates a Kubernetes Job that runs `pi` against the matching event payload.
 
 Each trigger consists of:
@@ -261,77 +259,6 @@ Then modify or create a matching `Deployment` — the webhook endpoint will rece
 
 ---
 
-## 🤖 AITrigger
-
-`AITrigger` reuses the same Kubernetes watch semantics as `HTTPTrigger` and calls an OpenAI-compatible `/v1/chat/completions` endpoint.
-
-### Example
-
-```yaml
-apiVersion: triggers.harikube.info/v1
-kind: AITrigger
-metadata:
-  name: deployment-summary
-  namespace: default
-spec:
-  resource:
-    apiVersion: apps/v1
-    kind: Deployment
-  namespaces:
-    - default
-  eventTypes:
-    - ADDED
-    - MODIFIED
-
-  url:
-    static: "https://api.openai.com/v1/chat/completions"
-  method: POST
-
-  headers:
-    fromSecretRef:
-      Authorization:
-        name: openai-api-key
-        key: bearer
-
-  request:
-    model: gpt-4o-mini
-    systemPrompt: |
-      You summarize Kubernetes deployment changes for platform engineers.
-    promptTemplate: |
-      Summarize this event and list the most important fields as JSON:
-      {{ toJson . }}
-    temperature: "0.2"
-    maxTokens: 256
-```
-
-### AITrigger fields
-
-`AITrigger` supports the same:
-
-* resource selection (`resource`, `namespaces`, `labelSelectors`, `fieldSelectors`, `eventTypes`, `eventFilter`)
-* endpoint resolution (`url.static`, `url.template`, `url.service`)
-* transport/auth options (`method`, `auth`, `headers`, `delivery`)
-* status handling and automatic watcher restart behavior
-
-In addition, `spec.request` defines the model invocation payload:
-
-| Field | Description |
-| --- | --- |
-| `model` | OpenAI-compatible model identifier. |
-| `systemPrompt` | Optional Go template rendered as the system message. |
-| `promptTemplate` | Required Go template rendered as the user message from the watched object. |
-| `temperature` | Optional sampling temperature as a decimal string, for example `"0.2"`. |
-| `maxTokens` | Optional `max_tokens` value sent to the provider. |
-
-### Notes
-
-* The controller sends an OpenAI-compatible JSON payload with `model`, `messages`, `temperature`, and `max_tokens`.
-* Use `headers.fromSecretRef.Authorization` to inject a bearer token such as `Bearer <api-key>`.
-* `url.static`, `url.template`, and `url.service` allow direct provider access or routing through an internal AI gateway.
-* `toJson` is available in `systemPrompt` and `promptTemplate`.
-
----
-
 ## 🧠 PiTrigger
 
 `PiTrigger` reuses the same Kubernetes watch semantics as `HTTPTrigger`, but instead of calling an endpoint directly it spawns a Kubernetes Job that runs `pi` directly for each matching event.
@@ -460,6 +387,29 @@ data:
 ```
 
 Sample manifests are also available under `config/samples/`.
+
+### Ephemeral AI Triggers & Sleep/Wake Agent Orchestration
+
+HariKube introduces a zero-overhead, event-driven pattern for multi-agent workflows: **Ephemeral Triggers backed by Native Kubernetes Leases**.
+
+Instead of keeping heavy agent processes, long-lived WebSocket connections, or external polling loops continuously running in memory, agents can dynamically create short-lived, self-expiring event watchers `PITrigger`, persist their execution state to the control plane or event stream, and yield compute resources entirely until woken up.
+
+#### How It Works
+
+1. **Transient Registration:** When a parent agent spawns long-running subagent tasks, it creates an `AITrigger` attached to a `coordination.k8s.io/v1` `Lease` resource using standard Kubernetes `OwnerReferences`.
+2. **Stateless Offloading:** Before going idle, the agent persists its exact execution context, variables, and step checkpoint directly to the Kubernetes API Server (as a Status field, Annotation, or ConfigMap) or flushes it to the HariKube Kafka event stream.
+3. **Resource-Yielding Sleep:** The parent process yields memory and execution threads. The cluster consumes **zero idle compute resources** while waiting for subagents to report back.
+4. **Partitioned Storage-Side Wake-Up:** When a subagent completes its work (e.g., updating a CRD or posting a result), HariKube's storage-side filtered watch engine identifies the event and routes it directly to a leaderless worker (scaling up to 100+ parallel Go goroutines).
+5. **State Reload & Resume:** The awakened worker loads the persisted state snapshot from Kafka or the API Server, restores context, and resumes execution seamlessly.
+6. **Self-Cleaning Lifecycle:** Once the event is delivered—or if a lease expires without renewal—Kubernetes Garbage Collection automatically sweeps the temporary trigger. No leftover state, no manual `DELETE` cleanup calls.
+
+#### What Is It Good For?
+
+* **Zero-Idle Multi-Agent Workflows:** Run complex multi-step AI pipelines without paying for idle server time. Agents only consume resources when actively processing data.
+* **Resilient Distributed Checkpointing:** Since execution state is committed to Kafka or the Kubernetes API Server before sleeping, agents can survive node restarts, rescheduling, or pod evictions without losing progress.
+* **Leaderless Parallel Concurrency:** Bypasses traditional single-leader `etcd` bottlenecks. Hundreds of transient triggers can reconcile simultaneously across independent storage partition workers.
+* **No External Queue Dependencies:** Eliminates the need for Redis, Celery, or external pub/sub brokers. Distributed locking, event routing, and TTL state are handled natively by Kubernetes control plane primitives with atomic Optimistic Concurrency Control (OCC).
+* **Native RBAC & Network Security:** Ephemeral agent triggers inherit standard Kubernetes security semantics out of the box—no custom permission systems required.
 
 ### Building a custom PiTrigger worker image
 
