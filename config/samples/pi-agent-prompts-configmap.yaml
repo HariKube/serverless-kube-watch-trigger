@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pi-agent-prompts
+  namespace: default
+data:
+  README.md: |
+    Add prompt files here to customize the spawned pi worker.

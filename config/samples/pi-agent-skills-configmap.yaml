@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pi-agent-skills
+  namespace: default
+data:
+  README.md: |
+    Add skill files here to customize the spawned pi worker.

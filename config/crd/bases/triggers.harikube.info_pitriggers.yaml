@@ -1,0 +1,495 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: pitriggers.triggers.harikube.info
+spec:
+  group: triggers.harikube.info
+  names:
+    kind: PiTrigger
+    listKind: PiTriggerList
+    plural: pitriggers
+    singular: pitrigger
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.errorTime
+      name: ErrorTime
+      type: string
+    - jsonPath: .status.errorReason
+      name: ErrorReason
+      type: string
+    - jsonPath: .status.errorResourceVersion
+      name: ErrorResourceVersion
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: PiTrigger is the Schema for the pitriggers API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PiTriggerSpec defines the desired state of PiTrigger.
+            properties:
+              agent:
+                description: PiAgentSpec describes how to execute an embedded pi agent
+                  inside a Kubernetes Job.
+                properties:
+                  activeDeadlineSeconds:
+                    description: ActiveDeadlineSeconds limits the total execution
+                      time of a worker Job.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  backoffLimit:
+                    description: BackoffLimit configures Kubernetes Job retries for
+                      a failed worker.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  configSecretRef:
+                    description: |-
+                      ConfigSecretRef references the Secret mounted into ~/.pi/agent for the spawned worker.
+                      The Secret must provide settings.json, models.json, models-store.json, and auth.json keys.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  env:
+                    description: Env adds extra environment variables to the worker
+                      container.
+                    items:
+                      description: EnvVar represents an environment variable present
+                        in a Container.
+                      properties:
+                        name:
+                          description: Name of the environment variable. Must be a
+                            C_IDENTIFIER.
+                          type: string
+                        value:
+                          description: |-
+                            Variable references $(VAR_NAME) are expanded
+                            using the previously defined environment variables in the container and
+                            any service environment variables. If a variable cannot be resolved,
+                            the reference in the input string will be unchanged. Double $$ are reduced
+                            to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                            "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                            Escaped references will never be expanded, regardless of whether the variable
+                            exists or not.
+                            Defaults to "".
+                          type: string
+                        valueFrom:
+                          description: Source for the environment variable's value.
+                            Cannot be used if value is not empty.
+                          properties:
+                            configMapKeyRef:
+                              description: Selects a key of a ConfigMap.
+                              properties:
+                                key:
+                                  description: The key to select.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the ConfigMap or its
+                                    key must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            fieldRef:
+                              description: |-
+                                Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                              properties:
+                                apiVersion:
+                                  description: Version of the schema the FieldPath
+                                    is written in terms of, defaults to "v1".
+                                  type: string
+                                fieldPath:
+                                  description: Path of the field to select in the
+                                    specified API version.
+                                  type: string
+                              required:
+                              - fieldPath
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            resourceFieldRef:
+                              description: |-
+                                Selects a resource of the container: only resources limits and requests
+                                (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                              properties:
+                                containerName:
+                                  description: 'Container name: required for volumes,
+                                    optional for env vars'
+                                  type: string
+                                divisor:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Specifies the output format of the
+                                    exposed resources, defaults to "1"
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                resource:
+                                  description: 'Required: resource to select'
+                                  type: string
+                              required:
+                              - resource
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            secretKeyRef:
+                              description: Selects a key of a secret in the pod's
+                                namespace
+                              properties:
+                                key:
+                                  description: The key of the secret to select from.  Must
+                                    be a valid secret key.
+                                  type: string
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                                optional:
+                                  description: Specify whether the Secret or its key
+                                    must be defined
+                                  type: boolean
+                              required:
+                              - key
+                              type: object
+                              x-kubernetes-map-type: atomic
+                          type: object
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  envFrom:
+                    description: EnvFrom imports environment variables from ConfigMaps
+                      or Secrets into the worker container.
+                    items:
+                      description: EnvFromSource represents the source of a set of
+                        ConfigMaps or Secrets
+                      properties:
+                        configMapRef:
+                          description: The ConfigMap to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        prefix:
+                          description: Optional text to prepend to the name of each
+                            environment variable. Must be a C_IDENTIFIER.
+                          type: string
+                        secretRef:
+                          description: The Secret to select from
+                          properties:
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the Secret must be defined
+                              type: boolean
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                    type: array
+                  extensions:
+                    description: Extensions explicitly loads pi extensions for the
+                      spawned worker Job.
+                    items:
+                      type: string
+                    type: array
+                  image:
+                    description: Image is the container image used for spawned pi
+                      agent Jobs.
+                    type: string
+                  imagePullPolicy:
+                    description: ImagePullPolicy controls when the Job image is pulled.
+                    type: string
+                  model:
+                    description: Model selects the pi model used by the spawned worker
+                      Job.
+                    type: string
+                  noExtensions:
+                    default: true
+                    description: NoExtensions disables loading ambient pi extensions
+                      for the spawned worker Job.
+                    type: boolean
+                  promptsConfigMapRef:
+                    description: PromptsConfigMapRef references the ConfigMap mounted
+                      into ~/.pi/agent/prompts.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  provider:
+                    description: Provider selects the pi provider used by the spawned
+                      worker Job.
+                    type: string
+                  resources:
+                    description: Resources configures CPU and memory requests and
+                      limits for the worker container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This is an alpha field and requires enabling the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  serviceAccountName:
+                    description: ServiceAccountName overrides the ServiceAccount used
+                      by spawned Jobs.
+                    type: string
+                  skillsConfigMapRef:
+                    description: SkillsConfigMapRef references the ConfigMap mounted
+                      into ~/.pi/agent/skills.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  timeout:
+                    default: 10m
+                    description: Timeout limits the total runtime of the spawned worker
+                      Job.
+                    format: duration
+                    type: string
+                  ttlSecondsAfterFinished:
+                    description: TTLSecondsAfterFinished controls automatic cleanup
+                      of completed Jobs.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  workingDir:
+                    description: WorkingDir is the working directory used by the spawned
+                      worker Job.
+                    type: string
+                required:
+                - configSecretRef
+                - image
+                - promptsConfigMapRef
+                - skillsConfigMapRef
+                type: object
+              concurrency:
+                default: 1
+                description: Concurency represent the number of parallel triggers.
+                maximum: 100
+                minimum: 1
+                type: integer
+              eventFilter:
+                description: 'EventFilter represents a filter expression, follows
+                  Go template syntax. Example: ne .status.availableReplicas 0.'
+                type: string
+              eventTypes:
+                default:
+                - ADDED
+                - MODIFIED
+                - DELETED
+                description: EventType represents the type of events to trigger.
+                items:
+                  enum:
+                  - ADDED
+                  - MODIFIED
+                  - DELETED
+                  type: string
+                type: array
+              fieldSelectors:
+                description: FieldSelector represents list of field selectors.
+                items:
+                  type: string
+                type: array
+              labelSelectors:
+                description: LabelSelector represents list of label selectors.
+                items:
+                  type: string
+                type: array
+              maxJobs:
+                description: MaxJobs limits the number of active worker Jobs for this
+                  trigger. Zero means unlimited.
+                format: int32
+                minimum: 0
+                type: integer
+              namespaces:
+                description: Namespaces represents the namespaces to watch.
+                items:
+                  type: string
+                type: array
+              resource:
+                description: Resource represents the object kind.
+                properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion defines the versioned schema of this representation of an object.
+                      Servers should convert recognized schemas to the latest internal value, and
+                      may reject unrecognized values.
+                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+                    type: string
+                  kind:
+                    description: |-
+                      Kind is a string value representing the REST resource this object represents.
+                      Servers may infer this from the endpoint the client submits requests to.
+                      Cannot be updated.
+                      In CamelCase.
+                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                    type: string
+                type: object
+              sendInitialEvents:
+                default: false
+                description: SendInitialEvents represents initial object state triggers.
+                type: boolean
+            required:
+            - agent
+            - resource
+            type: object
+          status:
+            description: PiTriggerStatus defines the observed state of PiTrigger.
+            properties:
+              errorReason:
+                type: string
+              errorResourceVersion:
+                type: string
+              errorTime:
+                format: date-time
+                type: string
+              lastGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  Phase is the observed operational state of the trigger watcher. It is reported as
+                  Running whenever a watcher is established and set to Error whenever the
+                  watcher collapses or the trigger cannot be initialized.
+                enum:
+                - Running
+                - Error
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

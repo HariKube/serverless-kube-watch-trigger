@@ -181,7 +181,7 @@ var _ = Describe("deliverPayload", func() {
 		}))
 		defer srv.Close()
 
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, trigger, method, srv.URL, "body", nil, nil, "", 1, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, trigger, method, srv.URL, "body", nil, nil, "", 1, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
 
@@ -203,7 +203,7 @@ var _ = Describe("deliverPayload", func() {
 		defer srv.Close()
 
 		start := time.Now()
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, trigger, method, srv.URL, "body", nil, nil, "", 5, timeout, retryBackoff{min: time.Millisecond, max: 5 * time.Millisecond}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, trigger, method, srv.URL, "body", nil, nil, "", 5, timeout, retryBackoff{min: time.Millisecond, max: 5 * time.Millisecond}, eventType, metadata)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
@@ -218,7 +218,7 @@ var _ = Describe("deliverPayload", func() {
 		}))
 		defer srv.Close()
 
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, trigger, method, srv.URL, "body", nil, nil, "", 2, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, trigger, method, srv.URL, "body", nil, nil, "", 2, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
 		Expect(ok).To(BeFalse())
 		Expect(err).To(MatchError("status code is 503"))
 
@@ -230,7 +230,7 @@ var _ = Describe("deliverPayload", func() {
 	It("records transport failures separately", func() {
 		trigger := "default/test-transport"
 		// Port 1 is virtually guaranteed to refuse the connection.
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, trigger, method, "http://127.0.0.1:1/hook", "body", nil, nil, "", 0, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, trigger, method, "http://127.0.0.1:1/hook", "body", nil, nil, "", 0, timeout, retryBackoff{min: time.Millisecond, max: time.Millisecond}, eventType, metadata)
 		Expect(ok).To(BeFalse())
 		Expect(err).To(HaveOccurred())
 
@@ -247,7 +247,7 @@ var _ = Describe("deliverPayload", func() {
 		defer srv.Close()
 
 		basicAuth := &triggersv1.BasicAuth{User: "user"}
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, "default/test-basic-auth", method, srv.URL, "body", nil, basicAuth, "password", 0, timeout, retryBackoff{}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, "default/test-basic-auth", method, srv.URL, "body", nil, basicAuth, "password", 0, timeout, retryBackoff{}, eventType, metadata)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
 		Expect(<-gotAuth).To(Equal("Basic dXNlcjpwYXNzd29yZA=="))
@@ -261,7 +261,7 @@ var _ = Describe("deliverPayload", func() {
 		}))
 		defer srv.Close()
 
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, "default/test-no-auth", method, srv.URL, "body", nil, nil, "", 0, timeout, retryBackoff{}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, "default/test-no-auth", method, srv.URL, "body", nil, nil, "", 0, timeout, retryBackoff{}, eventType, metadata)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
 		Expect(<-gotAuth).To(Equal(""))
@@ -276,7 +276,7 @@ var _ = Describe("deliverPayload", func() {
 
 		cancel()
 
-		ok, err := deliverPayload(ctx, logr.Discard(), client, kind, trigger, method, srv.URL, "body", nil, nil, "", 10, time.Millisecond, retryBackoff{min: time.Second, max: time.Second}, eventType, metadata)
+		ok, err := deliverPayload(ctx, logr.Discard(), client, trigger, method, srv.URL, "body", nil, nil, "", 10, time.Millisecond, retryBackoff{min: time.Second, max: time.Second}, eventType, metadata)
 		Expect(ok).To(BeFalse())
 		Expect(err).To(HaveOccurred())
 	})

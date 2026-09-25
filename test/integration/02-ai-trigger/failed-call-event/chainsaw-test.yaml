@@ -1,144 +1,91 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: failed-ai-call-event
+  name: secondary-pi-trigger-job
 spec:
   timeouts:
-    exec: 3m
+    exec: 4m
   skipDelete: true
-  namespace: ai-trigger-failure
+  namespace: pi-trigger-secondary
   steps:
-  - name: Enable trigger call events
+  - name: Prepare namespace
     try:
-  - name: Deploy failing AI mock server
+    - script:
+        content: |
+          kubectl delete namespace pi-trigger-secondary --ignore-not-found=true --wait=true || true
+          kubectl create namespace pi-trigger-secondary --dry-run=client -o yaml | kubectl apply -f -
+  - name: Create PiTrigger
     try:
-    - apply:
-        resource:
+    - script:
+        content: |
+          set -euo pipefail
+          IMAGE="ghcr.io/harikube/pi-runner:latest"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: pi-agent-config
+            namespace: pi-trigger-secondary
+          stringData:
+            settings.json: '{"provider":"test"}'
+            models.json: '[]'
+            models-store.json: '{}'
+            auth.json: '{}'
+          ---
           apiVersion: v1
           kind: ConfigMap
           metadata:
-            name: failing-ai-mock-server
-            namespace: ai-trigger-failure
+            name: pi-agent-prompts
+            namespace: pi-trigger-secondary
           data:
-            server.py: |
-              from http.server import BaseHTTPRequestHandler, HTTPServer
-
-              class Handler(BaseHTTPRequestHandler):
-                  def do_POST(self):
-                      self.send_response(500)
-                      self.send_header("Content-Type", "application/json")
-                      self.end_headers()
-                      self.wfile.write(b'{"error":"failure"}')
-
-                  def log_message(self, format, *args):
-                      return
-
-              HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-    - apply:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: failing-ai-mock
-            namespace: ai-trigger-failure
-            labels:
-              app: failing-ai-mock
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: failing-ai-mock
-            template:
-              metadata:
-                labels:
-                  app: failing-ai-mock
-              spec:
-                containers:
-                - name: server
-                  image: python:3.12-alpine
-                  command:
-                  - python
-                  - /app/server.py
-                  ports:
-                  - containerPort: 8080
-                  readinessProbe:
-                    tcpSocket:
-                      port: 8080
-                    initialDelaySeconds: 1
-                    periodSeconds: 2
-                  volumeMounts:
-                  - name: script
-                    mountPath: /app
-                volumes:
-                - name: script
-                  configMap:
-                    name: failing-ai-mock-server
-    - apply:
-        resource:
+            review.md: |
+              Review prompt.
+          ---
           apiVersion: v1
-          kind: Service
+          kind: ConfigMap
           metadata:
-            name: failing-ai-mock
-            namespace: ai-trigger-failure
-          spec:
-            selector:
-              app: failing-ai-mock
-            ports:
-            - name: http
-              port: 8080
-              targetPort: 8080
-    - assert:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: failing-ai-mock
-            namespace: ai-trigger-failure
-          status:
-            readyReplicas: 1
-  - name: Create AITrigger
-    try:
-    - apply:
-        resource:
+            name: pi-agent-skills
+            namespace: pi-trigger-secondary
+          data:
+            SKILL.md: |
+              # skill
+          ---
           apiVersion: triggers.harikube.info/v1
-          kind: AITrigger
+          kind: PiTrigger
           metadata:
-            name: ai-trigger-failure
-            namespace: ai-trigger-failure
+            name: pi-trigger-secondary
+            namespace: pi-trigger-secondary
           spec:
             resource:
               apiVersion: v1
               kind: ConfigMap
             namespaces:
-            - ai-trigger-failure
+            - pi-trigger-secondary
             labelSelectors:
-            - watch-e2e-ai-fail=true
+            - watch-e2e-pi-secondary=true
             eventTypes:
             - ADDED
-            url:
-              service:
-                name: failing-ai-mock
-                namespace: ai-trigger-failure
-                portName: http
-                uri:
-                  static: /v1/chat/completions
-            method: POST
-            delivery:
-              timeout: 2s
-              retries: 1
-            request:
-              model: gpt-4o-mini
-              promptTemplate: |
-                Summarize {{ .metadata.name }} in namespace {{ .metadata.namespace }}
+            agent:
+              image: ${IMAGE}
+              configSecretRef:
+                name: pi-agent-config
+              promptsConfigMapRef:
+                name: pi-agent-prompts
+              skillsConfigMapRef:
+                name: pi-agent-skills
+              workingDir: /
+              noExtensions: true
+              backoffLimit: 0
+              ttlSecondsAfterFinished: 60
+          EOF
     - assert:
         resource:
           apiVersion: triggers.harikube.info/v1
-          kind: AITrigger
+          kind: PiTrigger
           metadata:
-            name: ai-trigger-failure
-            namespace: ai-trigger-failure
-    - sleep:
-        duration: 2s
+            name: pi-trigger-secondary
+            namespace: pi-trigger-secondary
   - name: Create watched ConfigMap
     try:
     - apply:
@@ -146,30 +93,41 @@ spec:
           apiVersion: v1
           kind: ConfigMap
           metadata:
-            name: ai-trigger-failure-source
-            namespace: ai-trigger-failure
+            name: pi-trigger-secondary-source
+            namespace: pi-trigger-secondary
             labels:
-              watch-e2e-ai-fail: "true"
+              watch-e2e-pi-secondary: "true"
           data:
             key: value
-  - name: Validate failure status and event
+  - name: Validate second Job execution
     try:
     - script:
         content: |
           set -euo pipefail
-          for _ in $(seq 1 40); do
-            ERROR_REASON="$(kubectl get aitrigger ai-trigger-failure -n ai-trigger-failure -o jsonpath='{.status.errorReason}' || true)"
-            EVENT_OUTPUT="$(kubectl get events -n ai-trigger-failure \
-              --field-selector involvedObject.kind=AITrigger,involvedObject.name=ai-trigger-failure,reason=TriggerCallFailed \
-              -o jsonpath='{range .items[*]}{.type}{"|"}{.reason}{"|"}{.message}{"\n"}{end}')"
-            if [ -n "$ERROR_REASON" ] && printf '%s' "$EVENT_OUTPUT" | grep -q 'Warning|TriggerCallFailed'; then
-              printf '%s\n' "$ERROR_REASON" | grep 'status code is 500'
-              printf '%s\n' "$EVENT_OUTPUT" | grep 'status code is 500'
+          for _ in $(seq 1 60); do
+            JOB_NAME="$(kubectl get jobs -n pi-trigger-secondary -l triggers.harikube.info/pitrigger-name=pi-trigger-secondary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            POD_NAME=""
+            JOB_ARGS=""
+            if [ -n "$JOB_NAME" ]; then
+              POD_NAME="$(kubectl get pods -n pi-trigger-secondary -l job-name=${JOB_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+              JOB_ARGS="$(kubectl get job "$JOB_NAME" -n pi-trigger-secondary -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)"
+            fi
+
+            if [ -n "$JOB_NAME" ] \
+              && [ -n "$POD_NAME" ] \
+              && printf '%s' "$JOB_ARGS" | grep -q -- '--no-session' \
+              && printf '%s' "$JOB_ARGS" | grep -q -- '--mode'; then
+              kubectl get pitrigger pi-trigger-secondary -n pi-trigger-secondary -o yaml
+              kubectl get job "$JOB_NAME" -n pi-trigger-secondary -o yaml
+              kubectl get pod "$POD_NAME" -n pi-trigger-secondary -o yaml
               exit 0
             fi
+
             sleep 2
           done
-          echo "expected failure status or event not found"
-          kubectl get aitrigger ai-trigger-failure -n ai-trigger-failure -o yaml
-          kubectl get events -n ai-trigger-failure --sort-by=.lastTimestamp
+
+          echo "expected secondary PiTrigger job execution details were not observed"
+          kubectl get pitrigger pi-trigger-secondary -n pi-trigger-secondary -o yaml || true
+          kubectl get jobs -n pi-trigger-secondary -o wide || true
+          kubectl get pods -n pi-trigger-secondary -o wide || true
           exit 1

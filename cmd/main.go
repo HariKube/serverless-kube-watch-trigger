@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	batchv1 "k8s.io/api/batch/v1"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 
@@ -38,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -213,7 +216,15 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-		Cache: cache.Options{},
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&batchv1.Job{}: {
+					Label: labels.SelectorFromSet(labels.Set{
+						"triggers.harikube.info/pitrigger-job": "true",
+					}),
+				},
+			},
+		},
 	}
 	if namespace != "" {
 		options.Cache.DefaultNamespaces = map[string]cache.Config{
@@ -273,17 +284,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	aiReconciler := &controller.AITriggerReconciler{
+	piReconciler := &controller.PiTriggerReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
 	}
-	if err := aiReconciler.SetupWithManager(ctx, mgr, maxConcurrentReconciles, &wg); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "AITrigger")
+	if err := piReconciler.SetupWithManager(ctx, mgr, maxConcurrentReconciles, &wg); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PiTrigger")
 		os.Exit(1)
 	}
-	if err := mgr.Add(&controller.Watcher{Initializer: aiReconciler}); err != nil {
+	if err := mgr.Add(&controller.Watcher{Initializer: piReconciler}); err != nil {
 		setupLog.Error(err, "unable to create watcher", "controller", "Watcher")
+		os.Exit(1)
+	}
+
+	piJobReconciler := &controller.PiTriggerJobReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	if err := piJobReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PiTriggerJob")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

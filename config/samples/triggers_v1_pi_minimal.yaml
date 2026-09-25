@@ -1,0 +1,26 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: minimal-pitrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: ConfigMap
+  namespaces:
+    - default
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - npm:pi-graft
+    timeout: 10m

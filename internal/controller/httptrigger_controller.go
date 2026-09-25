@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/facette/natsort"
-	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -339,44 +338,26 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		return nil
 	}
 
-	handleError := func(err error, logger logr.Logger) {
-		handleTriggerWatcherError(
-			r.ctx,
-			err,
-			logger,
-			r.Recorder,
-			trigger,
-			triggerRefName,
-			*lastResourceVersion.Load(),
-			&r.runningTriggersLock,
-			r.runningTriggers,
-			ctx.Done(),
-			func() {
-				watchersMu.Lock()
-				active := sessionWatchers
-				watchersMu.Unlock()
+	recordRuntimeError := func(errorReason, errorResourceVersion string) {
+		patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
+		defer patchCancel()
 
-				stopWatchers(active)
-			},
-			func(patchCtx context.Context, errorTime metav1.Time, errorReason, errorResourceVersion string) (bool, error) {
-				latest := &triggersv1.HTTPTrigger{}
-				if err := r.Get(patchCtx, client.ObjectKeyFromObject(trigger), latest); err != nil {
-					return false, err
-				}
+		latest := &triggersv1.HTTPTrigger{}
+		if err := r.Get(patchCtx, client.ObjectKeyFromObject(trigger), latest); err != nil {
+			return
+		}
+		if latest.Generation != trigger.Generation {
+			return
+		}
+		if latest.Status.Phase == triggersv1.TriggerPhaseError && latest.Status.ErrorReason == errorReason && latest.Status.ErrorResourceVersion == errorResourceVersion {
+			return
+		}
 
-				if latest.Generation != trigger.Generation || latest.Status.Phase == triggersv1.TriggerPhaseError {
-					return false, nil
-				}
-
-				patched := latest.DeepCopy()
-				patched.Status.Phase = triggersv1.TriggerPhaseError
-				patched.Status.ErrorTime = errorTime
-				patched.Status.ErrorReason = errorReason
-				patched.Status.ErrorResourceVersion = errorResourceVersion
-
-				return true, r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
-			},
-		)
+		patched := latest.DeepCopy()
+		patched.Status.ErrorTime = metav1.Now()
+		patched.Status.ErrorReason = errorReason
+		patched.Status.ErrorResourceVersion = errorResourceVersion
+		_ = r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
 	}
 
 	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
@@ -387,9 +368,38 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		maxReconnectBackoff = 30 * time.Second
 	)
 
+	deliveryGate := r.get(triggerRefName)
+
 	for i := 1; i <= int(trigger.Spec.Concurrency); i++ {
 		go func() {
 			reconnectBackoff := minReconnectBackoff
+			reconnectWatchStream := func(reason string, activeWatchers []watch.Interface, activeGen uint64) bool {
+				stopWatchers(activeWatchers)
+				if ctx.Err() != nil {
+					return false
+				}
+
+				logger.V(1).Info("Watch stream reconnecting", "reason", reason, "gen", activeGen, "lastResourceVersion", *lastResourceVersion.Load())
+				for {
+					if err := reconnect(activeGen); err != nil {
+						logger.Error(err, "Reconnect failed", "reason", reason, "gen", activeGen, "retryAfter", reconnectBackoff.String())
+						if !sleepContext(ctx, reconnectBackoff) {
+							return false
+						}
+						if reconnectBackoff < maxReconnectBackoff {
+							reconnectBackoff *= 2
+							if reconnectBackoff > maxReconnectBackoff {
+								reconnectBackoff = maxReconnectBackoff
+							}
+						}
+						continue
+					}
+
+					logger.V(1).Info("Watch stream reconnected", "reason", reason, "gen", activeGen)
+					reconnectBackoff = minReconnectBackoff
+					return true
+				}
+			}
 
 			for {
 				watchersMu.Lock()
@@ -399,195 +409,169 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 				_, data, ok := reflect.Select(buildWatcherSelectCases(activeWatchers, ctx.Done()))
 				if !ok {
-					stopWatchers(activeWatchers)
-
-					if ctx.Err() != nil {
+					if !reconnectWatchStream("closed", activeWatchers, activeGen) {
 						return
 					}
-
-					logger.V(1).Info("Watch stream closed, reconnecting", "gen", activeGen, "lastResourceVersion", *lastResourceVersion.Load())
-
-					if err := reconnect(activeGen); err != nil {
-						logger.Error(err, "Reconnect failed", "gen", activeGen)
-						handleError(err, logger)
-
-						return
-					}
-
-					logger.V(1).Info("Watch stream reconnected", "gen", activeGen)
-
-					<-time.After(reconnectBackoff)
-
-					if reconnectBackoff < maxReconnectBackoff {
-						reconnectBackoff *= 2
-					}
-
 					continue
 				}
 
 				reconnectBackoff = minReconnectBackoff
-
-				eventVal := data.Interface()
-				event := eventVal.(watch.Event)
-
+				event := data.Interface().(watch.Event)
 				if event.Type == watch.Error {
-					handleError(fmt.Errorf("error event received"), logger)
-
-					return
+					if !reconnectWatchStream("error event", activeWatchers, activeGen) {
+						return
+					}
+					continue
 				} else if event.Object == nil {
 					continue
-				} else if _, ok := eventTypes[string(event.Type)]; !ok {
-					continue
-				}
-
-				event.Object.GetObjectKind().SetGroupVersionKind(gvk)
-
-				unstructuredObj, ok := event.Object.(*unstructured.Unstructured)
-				if !ok {
-					handleError(fmt.Errorf("event conversion to unstructured failed"), logger)
-
-					return
 				}
 
 				if event.Type == watch.Bookmark {
 					bookmark, ok := event.Object.(*metav1.PartialObjectMetadata)
-					if !ok {
-						logger.Error(errors.New("failed to convert bookmark to metav1.PartialObjectMetadata"), "event", event)
-
-						continue
-					} else if bookmark == nil {
+					if !ok || bookmark == nil {
+						logger.Error(errors.New("failed to convert bookmark to metav1.PartialObjectMetadata"), "Skipping malformed bookmark event")
 						continue
 					}
 
 					logger.Info("Received bookmark event", "resourceVersion", bookmark.GetResourceVersion())
-
 					for {
 						rv := bookmark.GetResourceVersion()
 						lrv := lastResourceVersion.Load()
-
 						if natsort.Compare(rv, *lrv) {
 							break
 						} else if lastResourceVersion.CompareAndSwap(lrv, &rv) {
 							break
 						}
 					}
+					continue
+				}
 
+				if _, ok := eventTypes[string(event.Type)]; !ok {
+					continue
+				}
+
+				event.Object.GetObjectKind().SetGroupVersionKind(gvk)
+				unstructuredObj, ok := event.Object.(*unstructured.Unstructured)
+				if !ok {
+					logger.Error(fmt.Errorf("event conversion to unstructured failed"), "Skipping malformed watch event", "eventType", event.Type)
 					continue
 				}
 
 				if trigger.Spec.EventFilter != "" {
 					renderedMatch, err := renderTemplateToString(compiledTemplates, filterTemplateName, unstructuredObj.Object)
 					if err != nil {
-						handleError(err, logger)
-
-						return
+						logger.Error(err, "Skipping watch event because event filter evaluation failed", "eventType", event.Type, "resourceVersion", unstructuredObj.GetResourceVersion(), "name", unstructuredObj.GetName(), "namespace", unstructuredObj.GetNamespace())
+						continue
 					}
 					if renderedMatch != trueString {
 						continue
 					}
 				}
 
-				url, err := buildTriggerURL(trigger.Spec.URL, compiledTemplates, unstructuredObj.Object, serviceScheme, servicePort)
-				if err != nil {
-					handleError(err, logger)
-
-					return
+				metadata, ok := unstructuredObj.Object["metadata"].(map[string]interface{})
+				if !ok {
+					logger.Error(fmt.Errorf("object metadata is missing or invalid"), "Skipping malformed watch event", "eventType", event.Type, "resourceVersion", unstructuredObj.GetResourceVersion())
+					continue
 				}
 
-				body := ""
-				if trigger.Spec.Body.Template != "" {
-					body, err = renderTemplateToString(compiledTemplates, "body_template", unstructuredObj.Object)
+				for {
+					url, err := buildTriggerURL(trigger.Spec.URL, compiledTemplates, unstructuredObj.Object, serviceScheme, servicePort)
 					if err != nil {
-						handleError(err, logger)
-
-						return
-					}
-				}
-
-				contentType := "application/json"
-				if trigger.Spec.Body.ContentType != "" {
-					contentType = trigger.Spec.Body.ContentType
-				}
-				headers, err := buildTriggerHeaders(contentType, trigger.Spec.Headers, headerSecrets, compiledTemplates, unstructuredObj.Object)
-				if err != nil {
-					handleError(err, logger)
-
-					return
-				}
-
-				switch {
-				case trigger.Spec.Body.Signature.HMAC != nil:
-					var hash func() hash.Hash
-					switch trigger.Spec.Body.Signature.HMAC.HashType {
-					case triggersv1.SignatureHashTypeSHA256:
-						hash = sha256.New
-					case triggersv1.SignatureHashTypeSHA512:
-						hash = sha512.New
+						logger.Error(err, "Skipping watch event because URL build failed", "eventType", event.Type, "resourceVersion", unstructuredObj.GetResourceVersion(), "name", metadata["name"], "namespace", metadata["namespace"])
+						break
 					}
 
-					hasher := hmac.New(hash, signature)
-					hasher.Write([]byte(body))
-					signatureBytes := hasher.Sum(nil)
-
-					headers[trigger.Spec.Body.Signature.Header] = hex.EncodeToString(signatureBytes)
-				}
-
-				metadata := unstructuredObj.Object["metadata"].(map[string]interface{})
-
-				deliveryGate := r.get(triggerRefName)
-
-				// Apply the sustained-failure backoff: once the endpoint has
-				// failed repeatedly, deliveries are spaced out so the endpoint
-				// is not hammered by a stream of events while it is down.
-				if delay := deliveryGate.delay(); delay > 0 {
-					recordDeliveryBackoff(kindHTTPTrigger, triggerRefName)
-					logger.V(1).Info("Delaying delivery due to sustained endpoint failure", "name", metadata["name"], "namespace", metadata["namespace"], "delay", delay.String(), "consecutiveFailures", deliveryGate.consecutiveFailures())
-
-					if !sleepContext(ctx, delay) {
-						return
-					}
-				}
-
-				ok, retryErr := deliverPayload(
-					ctx,
-					logger,
-					httpClient,
-					kindHTTPTrigger,
-					triggerRefName,
-					methodOrDefault(trigger.Spec.Method),
-					url,
-					body,
-					headers,
-					trigger.Spec.Auth.BasicAuth,
-					userAuthPassword,
-					trigger.Spec.Delivery.Retries,
-					trigger.Spec.Delivery.Timeout.Duration,
-					retryBackoff{min: defaultRetryBackoffMin, max: defaultRetryBackoffMax},
-					string(event.Type),
-					metadata,
-				)
-				if ok {
-					deliveryGate.recordSuccess()
-
-					for {
-						rv := metadata["resourceVersion"].(string)
-						lrv := lastResourceVersion.Load()
-
-						if natsort.Compare(rv, *lrv) {
-							break
-						} else if lastResourceVersion.CompareAndSwap(lrv, &rv) {
+					body := ""
+					if trigger.Spec.Body.Template != "" {
+						body, err = renderTemplateToString(compiledTemplates, "body_template", unstructuredObj.Object)
+						if err != nil {
+							logger.Error(err, "Skipping watch event because body template rendering failed", "eventType", event.Type, "resourceVersion", unstructuredObj.GetResourceVersion(), "name", metadata["name"], "namespace", metadata["namespace"])
 							break
 						}
 					}
 
+					contentType := "application/json"
+					if trigger.Spec.Body.ContentType != "" {
+						contentType = trigger.Spec.Body.ContentType
+					}
+					headers, err := buildTriggerHeaders(contentType, trigger.Spec.Headers, headerSecrets, compiledTemplates, unstructuredObj.Object)
+					if err != nil {
+						logger.Error(err, "Skipping watch event because header rendering failed", "eventType", event.Type, "resourceVersion", unstructuredObj.GetResourceVersion(), "name", metadata["name"], "namespace", metadata["namespace"])
+						break
+					}
+
+					switch {
+					case trigger.Spec.Body.Signature.HMAC != nil:
+						var hash func() hash.Hash
+						switch trigger.Spec.Body.Signature.HMAC.HashType {
+						case triggersv1.SignatureHashTypeSHA256:
+							hash = sha256.New
+						case triggersv1.SignatureHashTypeSHA512:
+							hash = sha512.New
+						}
+
+						hasher := hmac.New(hash, signature)
+						_, _ = hasher.Write([]byte(body))
+						signatureBytes := hasher.Sum(nil)
+						headers[trigger.Spec.Body.Signature.Header] = hex.EncodeToString(signatureBytes)
+					}
+
+					if delay := deliveryGate.delay(); delay > 0 {
+						recordDeliveryBackoff(kindHTTPTrigger, triggerRefName)
+						logger.V(1).Info("Delaying delivery due to sustained endpoint failure", "name", metadata["name"], "namespace", metadata["namespace"], "delay", delay.String(), "consecutiveFailures", deliveryGate.consecutiveFailures())
+						if !sleepContext(ctx, delay) {
+							return
+						}
+					}
+
+					ok, retryErr := deliverPayload(
+						ctx,
+						logger,
+						httpClient,
+						triggerRefName,
+						methodOrDefault(trigger.Spec.Method),
+						url,
+						body,
+						headers,
+						trigger.Spec.Auth.BasicAuth,
+						userAuthPassword,
+						trigger.Spec.Delivery.Retries,
+						trigger.Spec.Delivery.Timeout.Duration,
+						retryBackoff{min: defaultRetryBackoffMin, max: defaultRetryBackoffMax},
+						string(event.Type),
+						metadata,
+					)
+					if ok {
+						deliveryGate.recordSuccess()
+						for {
+							rv, ok := metadata["resourceVersion"].(string)
+							if !ok || rv == "" {
+								logger.Error(fmt.Errorf("object metadata.resourceVersion is missing or invalid"), "Skipping resourceVersion checkpoint update after successful delivery", "eventType", event.Type, "name", metadata["name"], "namespace", metadata["namespace"])
+								break
+							}
+							lrv := lastResourceVersion.Load()
+							if natsort.Compare(rv, *lrv) {
+								break
+							} else if lastResourceVersion.CompareAndSwap(lrv, &rv) {
+								break
+							}
+						}
+						break
+					}
+
+					deliveryGate.recordFailure()
+					emitTriggerCallFailureEvent(r.Recorder, trigger, triggerRefName, methodOrDefault(trigger.Spec.Method), url, event.Type, metadata, retryErr)
+					recordRuntimeError(fmt.Sprintf("retry failed: %v", retryErr), unstructuredObj.GetResourceVersion())
+					retryDelay := deliveryGate.delay()
+					if retryDelay <= 0 {
+						retryDelay = time.Second
+					}
+					logger.Error(retryErr, "HTTP trigger delivery failed, retrying", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", unstructuredObj.GetResourceVersion(), "retryAfter", retryDelay.String())
+					if !sleepContext(ctx, retryDelay) {
+						return
+					}
 					continue
 				}
-
-				deliveryGate.recordFailure()
-				emitTriggerCallFailureEvent(r.Recorder, trigger, triggerRefName, methodOrDefault(trigger.Spec.Method), url, event.Type, metadata, retryErr)
-				handleError(fmt.Errorf("retry failed: %w", retryErr), logger)
-
-				return
 			}
 		}()
 	}

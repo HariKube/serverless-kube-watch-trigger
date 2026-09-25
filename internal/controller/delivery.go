@@ -32,7 +32,7 @@ import (
 
 const (
 	kindHTTPTrigger = "httptrigger"
-	kindAITrigger   = "aitrigger"
+	kindPiTrigger   = "pitrigger"
 
 	// defaultRetryBackoffMin is the initial delay observed between retry
 	// attempts of a single delivery.
@@ -230,7 +230,7 @@ func deliverPayload(
 	ctx context.Context,
 	logger logr.Logger,
 	httpClient *http.Client,
-	kind, triggerRefName, method, url string,
+	triggerRefName, method, url string,
 	body string,
 	headers map[string]string,
 	basicAuth *triggersv1.BasicAuth,
@@ -241,6 +241,7 @@ func deliverPayload(
 	eventType string,
 	metadata map[string]interface{},
 ) (bool, error) {
+	const kind = kindHTTPTrigger
 	var retryErr error
 
 	for attempt := 0; attempt <= int(retries); attempt++ {

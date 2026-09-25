@@ -2,6 +2,9 @@
 resources:
 - triggers_v1_minimal.yaml
 - triggers_v1_full.yaml
-- triggers_v1_ai_minimal.yaml
-- triggers_v1_ai_full.yaml
+- pi-agent-config-secret.yaml
+- pi-agent-prompts-configmap.yaml
+- pi-agent-skills-configmap.yaml
+- triggers_v1_pi_minimal.yaml
+- triggers_v1_pi_full.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

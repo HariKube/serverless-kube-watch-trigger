@@ -45,6 +45,21 @@ import (
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 )
 
+// drainRunningTriggers stops every running trigger and clears the registry.
+func drainRunningTriggers(r *HTTPTriggerReconciler) {
+	r.runningTriggersLock.Lock()
+	cancels := make([]func(), 0, len(r.runningTriggers))
+	for _, c := range r.runningTriggers {
+		cancels = append(cancels, c)
+	}
+	r.runningTriggers = map[string]func(){}
+	r.runningTriggersLock.Unlock()
+
+	for _, c := range cancels {
+		c()
+	}
+}
+
 // newReconciler builds a fresh HTTPTriggerReconciler backed by the shared envtest clients.
 // The reconciler uses the suite-level ctx so that cancellation on suite teardown propagates.
 func newReconciler() *HTTPTriggerReconciler {
@@ -60,12 +75,7 @@ func newReconciler() *HTTPTriggerReconciler {
 		triggerLocks:        map[string]*sync.Mutex{},
 	}
 	DeferCleanup(func() {
-		r.runningTriggersLock.Lock()
-		for _, c := range r.runningTriggers {
-			c()
-		}
-		r.runningTriggers = map[string]func(){}
-		r.runningTriggersLock.Unlock()
+		drainRunningTriggers(r)
 	})
 	return r
 }
@@ -97,6 +107,30 @@ func cleanupService(ctx context.Context, name string) {
 var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 	const ns = "default"
 	bgCtx := context.Background()
+
+	It("drains running triggers without holding the mutex while callbacks run", func() {
+		r := &HTTPTriggerReconciler{
+			runningTriggersLock: sync.Mutex{},
+			runningTriggers:     map[string]func(){},
+		}
+		callbackRan := make(chan struct{})
+		done := make(chan struct{})
+
+		r.runningTriggers["default/test"] = func() {
+			r.runningTriggersLock.Lock()
+			defer r.runningTriggersLock.Unlock()
+			close(callbackRan)
+		}
+
+		go func() {
+			defer close(done)
+			drainRunningTriggers(r)
+		}()
+
+		Eventually(callbackRan, time.Second).Should(BeClosed())
+		Eventually(done, time.Second).Should(BeClosed())
+		Expect(r.runningTriggers).To(BeEmpty())
+	})
 
 	// ─────────────────────────────────────────────────────────────
 	// Reconcile: trigger not found returns no error
@@ -162,12 +196,7 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
 
 			// Cancel the running trigger so the map is clean.
-			r.runningTriggersLock.Lock()
-			for _, c := range r.runningTriggers {
-				c()
-			}
-			r.runningTriggers = map[string]func(){}
-			r.runningTriggersLock.Unlock()
+			drainRunningTriggers(r)
 
 			// Second reconcile - should be a no-op (returns immediately).
 			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})

@@ -11,12 +11,12 @@ metadata:
   labels:
     app.kubernetes.io/name: serverless-kube-watch-trigger
     app.kubernetes.io/managed-by: kustomize
-  name: aitrigger-editor-role
+  name: pitrigger-editor-role
 rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - aitriggers
+  - pitriggers
   verbs:
   - create
   - delete
@@ -28,6 +28,6 @@ rules:
 - apiGroups:
   - triggers.harikube.info
   resources:
-  - aitriggers/status
+  - pitriggers/status
   verbs:
   - get

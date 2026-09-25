@@ -1,0 +1,57 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: full-pitrigger-example
+  namespace: default
+spec:
+  resource:
+    apiVersion: apps/v1
+    kind: Deployment
+  namespaces:
+    - default
+    - kube-system
+  labelSelectors:
+    - app=frontend
+  fieldSelectors:
+    - metadata.name=my-deployment
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  eventFilter: 'ne .status.availableReplicas 0'
+  concurrency: 2
+  maxJobs: 4
+  sendInitialEvents: false
+
+  agent:
+    image: ghcr.io/harikube/pi-runner:latest
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    imagePullPolicy: IfNotPresent
+    serviceAccountName: pi-trigger-runner
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - npm:pi-graft
+    timeout: 10m
+    env:
+      - name: PI_ENVIRONMENT
+        value: production
+    envFrom:
+      - secretRef:
+          name: pi-agent-credentials
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    backoffLimit: 3
+    activeDeadlineSeconds: 1800
+    ttlSecondsAfterFinished: 600

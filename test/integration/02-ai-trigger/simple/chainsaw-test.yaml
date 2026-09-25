@@ -1,287 +1,91 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: simple-ai-trigger
+  name: simple-pi-trigger
 spec:
   timeouts:
-    exec: 3m
+    exec: 4m
   skipDelete: true
-  namespace: ai-trigger-simple
+  namespace: pi-trigger-simple
   steps:
-  - name: Deploy AI mock server with RBAC
+  - name: Prepare namespace
     try:
     - script:
         content: |
-          kubectl delete namespace ai-trigger-simple --ignore-not-found=true --wait=true || true
-          kubectl create namespace ai-trigger-simple --dry-run=client -o yaml | kubectl apply -f -
-    - apply:
-        resource:
+          kubectl delete namespace pi-trigger-simple --ignore-not-found=true --wait=true || true
+          kubectl create namespace pi-trigger-simple --dry-run=client -o yaml | kubectl apply -f -
+  - name: Create PiTrigger
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          IMAGE="ghcr.io/harikube/pi-runner:latest"
+
+          cat <<EOF | kubectl apply -f -
           apiVersion: v1
-          kind: ServiceAccount
+          kind: Secret
           metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-    - apply:
-        resource:
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: Role
-          metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-          rules:
-          - apiGroups:
-            - ""
-            resources:
-            - configmaps
-            verbs:
-            - create
-            - get
-            - list
-            - patch
-            - update
-    - apply:
-        resource:
-          apiVersion: rbac.authorization.k8s.io/v1
-          kind: RoleBinding
-          metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-          roleRef:
-            apiGroup: rbac.authorization.k8s.io
-            kind: Role
-            name: ai-trigger-mock
-          subjects:
-          - kind: ServiceAccount
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-    - apply:
-        resource:
+            name: pi-agent-config
+            namespace: pi-trigger-simple
+          stringData:
+            settings.json: '{"provider":"test"}'
+            models.json: '[]'
+            models-store.json: '{}'
+            auth.json: '{}'
+          ---
           apiVersion: v1
           kind: ConfigMap
           metadata:
-            name: ai-trigger-mock-server
-            namespace: ai-trigger-simple
+            name: pi-agent-prompts
+            namespace: pi-trigger-simple
           data:
-            server.py: |
-              import json
-              import os
-              import re
-              import ssl
-              import urllib.error
-              import urllib.request
-              from http.server import BaseHTTPRequestHandler, HTTPServer
-
-              SERVICE_ACCOUNT_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
-              with open(os.path.join(SERVICE_ACCOUNT_DIR, "token"), encoding="utf-8") as fh:
-                  TOKEN = fh.read().strip()
-              with open(os.path.join(SERVICE_ACCOUNT_DIR, "namespace"), encoding="utf-8") as fh:
-                  NAMESPACE = fh.read().strip()
-
-              API_HOST = os.environ["KUBERNETES_SERVICE_HOST"]
-              API_PORT = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
-              API_BASE = f"https://{API_HOST}:{API_PORT}"
-              SSL_CONTEXT = ssl.create_default_context(cafile=os.path.join(SERVICE_ACCOUNT_DIR, "ca.crt"))
-
-              NAME_RE = re.compile(r"ConfigMap named\s+([a-z0-9.-]+)", re.IGNORECASE)
-              SOURCE_RE = re.compile(r"source\s+([a-z0-9.-]+)", re.IGNORECASE)
-              NS_RE = re.compile(r"namespace\s+([a-z0-9.-]+)", re.IGNORECASE)
-
-              def clean_match(value):
-                  return value.rstrip(".,;:!?)\"]}'")
-
-              def create_config_map(name, source_name, source_namespace, model, prompt):
-                  body = json.dumps({
-                      "apiVersion": "v1",
-                      "kind": "ConfigMap",
-                      "metadata": {
-                          "name": name,
-                          "namespace": NAMESPACE,
-                          "labels": {
-                              "app": "ai-trigger-mock",
-                              "created-by": "ai-trigger",
-                          },
-                      },
-                      "data": {
-                          "requestedName": name,
-                          "sourceName": source_name,
-                          "sourceNamespace": source_namespace,
-                          "model": model,
-                          "prompt": prompt,
-                      },
-                  }).encode("utf-8")
-
-                  request = urllib.request.Request(
-                      f"{API_BASE}/api/v1/namespaces/{NAMESPACE}/configmaps",
-                      data=body,
-                      headers={
-                          "Authorization": f"Bearer {TOKEN}",
-                          "Content-Type": "application/json",
-                      },
-                      method="POST",
-                  )
-
-                  try:
-                      with urllib.request.urlopen(request, context=SSL_CONTEXT):
-                          return
-                  except urllib.error.HTTPError as exc:
-                      if exc.code == 409:
-                          return
-                      raise
-
-              class Handler(BaseHTTPRequestHandler):
-                  def do_POST(self):
-                      if self.path != "/v1/chat/completions":
-                          self.send_response(404)
-                          self.end_headers()
-                          return
-
-                      content_length = int(self.headers.get("Content-Length", "0"))
-                      raw_body = self.rfile.read(content_length)
-                      payload = json.loads(raw_body or b"{}")
-                      messages = payload.get("messages", [])
-                      prompt = "\n".join(message.get("content", "") for message in messages)
-                      model = payload.get("model", "")
-
-                      name_match = NAME_RE.search(prompt)
-                      if not name_match:
-                          self.send_response(400)
-                          self.send_header("Content-Type", "application/json")
-                          self.end_headers()
-                          self.wfile.write(json.dumps({"error": "prompt did not contain a configmap name"}).encode("utf-8"))
-                          return
-
-                      source_match = SOURCE_RE.search(prompt)
-                      namespace_match = NS_RE.search(prompt)
-                      name = clean_match(name_match.group(1))
-                      source_name = clean_match(source_match.group(1)) if source_match else "unknown"
-                      source_namespace = clean_match(namespace_match.group(1)) if namespace_match else NAMESPACE
-
-                      create_config_map(name, source_name, source_namespace, model, prompt)
-
-                      response = {
-                          "id": "chatcmpl-mock",
-                          "object": "chat.completion",
-                          "choices": [
-                              {
-                                  "index": 0,
-                                  "finish_reason": "stop",
-                                  "message": {
-                                      "role": "assistant",
-                                      "content": f"created configmap {name}",
-                                  },
-                              }
-                          ],
-                      }
-
-                      self.send_response(200)
-                      self.send_header("Content-Type", "application/json")
-                      self.end_headers()
-                      self.wfile.write(json.dumps(response).encode("utf-8"))
-
-                  def log_message(self, format, *args):
-                      return
-
-              HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-    - apply:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-            labels:
-              app: ai-trigger-mock
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: ai-trigger-mock
-            template:
-              metadata:
-                annotations:
-                  mock-server-version: v2
-                labels:
-                  app: ai-trigger-mock
-              spec:
-                serviceAccountName: ai-trigger-mock
-                containers:
-                - name: server
-                  image: python:3.12-alpine
-                  command:
-                  - python
-                  - /app/server.py
-                  ports:
-                  - containerPort: 8080
-                  volumeMounts:
-                  - name: script
-                    mountPath: /app
-                volumes:
-                - name: script
-                  configMap:
-                    name: ai-trigger-mock-server
-    - apply:
-        resource:
+            review.md: |
+              Review prompt.
+          ---
           apiVersion: v1
-          kind: Service
+          kind: ConfigMap
           metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-          spec:
-            selector:
-              app: ai-trigger-mock
-            ports:
-            - name: http
-              port: 8080
-              targetPort: 8080
-    - assert:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: ai-trigger-mock
-            namespace: ai-trigger-simple
-          status:
-            readyReplicas: 1
-  - name: Create AITrigger
-    try:
-    - apply:
-        resource:
+            name: pi-agent-skills
+            namespace: pi-trigger-simple
+          data:
+            SKILL.md: |
+              # skill
+          ---
           apiVersion: triggers.harikube.info/v1
-          kind: AITrigger
+          kind: PiTrigger
           metadata:
-            name: ai-trigger-simple
-            namespace: ai-trigger-simple
+            name: pi-trigger-simple
+            namespace: pi-trigger-simple
           spec:
             resource:
               apiVersion: v1
               kind: ConfigMap
             namespaces:
-            - ai-trigger-simple
+            - pi-trigger-simple
             labelSelectors:
-            - watch-e2e-ai=true
+            - watch-e2e-pi=true
             eventTypes:
             - ADDED
-            url:
-              service:
-                name: ai-trigger-mock
-                namespace: ai-trigger-simple
-                portName: http
-                uri:
-                  static: /v1/chat/completions
-            method: POST
-            request:
-              model: gpt-4o-mini
-              promptTemplate: |
-                Create ConfigMap named {{ index .data "targetConfigMapName" }} for source {{ .metadata.name }} in namespace {{ .metadata.namespace }}
+            agent:
+              image: ${IMAGE}
+              configSecretRef:
+                name: pi-agent-config
+              promptsConfigMapRef:
+                name: pi-agent-prompts
+              skillsConfigMapRef:
+                name: pi-agent-skills
+              workingDir: /
+              noExtensions: true
+              backoffLimit: 0
+              ttlSecondsAfterFinished: 60
+          EOF
     - assert:
         resource:
           apiVersion: triggers.harikube.info/v1
-          kind: AITrigger
+          kind: PiTrigger
           metadata:
-            name: ai-trigger-simple
-            namespace: ai-trigger-simple
-    - sleep:
-        duration: 2s
+            name: pi-trigger-simple
+            namespace: pi-trigger-simple
   - name: Create watched ConfigMap
     try:
     - apply:
@@ -289,33 +93,41 @@ spec:
           apiVersion: v1
           kind: ConfigMap
           metadata:
-            name: ai-trigger-source
-            namespace: ai-trigger-simple
+            name: pi-trigger-source
+            namespace: pi-trigger-simple
             labels:
-              watch-e2e-ai: "true"
+              watch-e2e-pi: "true"
           data:
-            targetConfigMapName: ai-generated-result
-    - sleep:
-        duration: 8s
-  - name: Validate generated ConfigMap
-    try:
-    - assert:
-        resource:
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: ai-generated-result
-            namespace: ai-trigger-simple
-            labels:
-              created-by: ai-trigger
-          data:
-            requestedName: ai-generated-result
-            sourceName: ai-trigger-source
-            sourceNamespace: ai-trigger-simple
-            model: gpt-4o-mini
-    - script:
-        content: kubectl get configmap ai-generated-result -n ai-trigger-simple -o jsonpath='{.data.prompt}' | grep 'Create ConfigMap named ai-generated-result'
-  - name: Cleanup test
+            key: value
+  - name: Validate Job execution wiring
     try:
     - script:
-        content: echo "leaving namespace ai-trigger-simple in place for easier debugging"
+        content: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            JOB_NAME="$(kubectl get jobs -n pi-trigger-simple -l triggers.harikube.info/pitrigger-name=pi-trigger-simple -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            POD_NAME=""
+            JOB_ARGS=""
+            if [ -n "$JOB_NAME" ]; then
+              POD_NAME="$(kubectl get pods -n pi-trigger-simple -l job-name=${JOB_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+              JOB_ARGS="$(kubectl get job "$JOB_NAME" -n pi-trigger-simple -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)"
+            fi
+
+            if [ -n "$JOB_NAME" ] \
+              && [ -n "$POD_NAME" ] \
+              && printf '%s' "$JOB_ARGS" | grep -q -- '--no-session' \
+              && printf '%s' "$JOB_ARGS" | grep -q -- '--mode'; then
+              kubectl get pitrigger pi-trigger-simple -n pi-trigger-simple -o yaml
+              kubectl get job "$JOB_NAME" -n pi-trigger-simple -o yaml
+              kubectl get pod "$POD_NAME" -n pi-trigger-simple -o yaml
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "expected PiTrigger job execution details were not observed"
+          kubectl get pitrigger pi-trigger-simple -n pi-trigger-simple -o yaml || true
+          kubectl get jobs -n pi-trigger-simple -o wide || true
+          kubectl get pods -n pi-trigger-simple -o wide || true
+          exit 1

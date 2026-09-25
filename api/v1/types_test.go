@@ -19,6 +19,7 @@ package v1_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 
@@ -58,45 +59,29 @@ var _ = Describe("API v1 Types", func() {
 	})
 
 	Describe("AddToScheme", func() {
-		It("registers HTTPTrigger, AITrigger, and their list types with the scheme", func() {
+		It("registers HTTPTrigger, PiTrigger, and their list types with the scheme", func() {
 			s := scheme.Scheme
 			Expect(triggersv1.AddToScheme(s)).To(Succeed())
 
-			httpGVK := schema.GroupVersionKind{
-				Group:   "triggers.harikube.info",
-				Version: "v1",
-				Kind:    "HTTPTrigger",
-			}
+			httpGVK := schema.GroupVersionKind{Group: "triggers.harikube.info", Version: "v1", Kind: "HTTPTrigger"}
 			httpObj, err := s.New(httpGVK)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(httpObj).To(BeAssignableToTypeOf(&triggersv1.HTTPTrigger{}))
 
-			httpGVKList := schema.GroupVersionKind{
-				Group:   "triggers.harikube.info",
-				Version: "v1",
-				Kind:    "HTTPTriggerList",
-			}
+			httpGVKList := schema.GroupVersionKind{Group: "triggers.harikube.info", Version: "v1", Kind: "HTTPTriggerList"}
 			httpObjList, err := s.New(httpGVKList)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(httpObjList).To(BeAssignableToTypeOf(&triggersv1.HTTPTriggerList{}))
 
-			aiGVK := schema.GroupVersionKind{
-				Group:   "triggers.harikube.info",
-				Version: "v1",
-				Kind:    "AITrigger",
-			}
-			aiObj, err := s.New(aiGVK)
+			piGVK := schema.GroupVersionKind{Group: "triggers.harikube.info", Version: "v1", Kind: "PiTrigger"}
+			piObj, err := s.New(piGVK)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(aiObj).To(BeAssignableToTypeOf(&triggersv1.AITrigger{}))
+			Expect(piObj).To(BeAssignableToTypeOf(&triggersv1.PiTrigger{}))
 
-			aiGVKList := schema.GroupVersionKind{
-				Group:   "triggers.harikube.info",
-				Version: "v1",
-				Kind:    "AITriggerList",
-			}
-			aiObjList, err := s.New(aiGVKList)
+			piGVKList := schema.GroupVersionKind{Group: "triggers.harikube.info", Version: "v1", Kind: "PiTriggerList"}
+			piObjList, err := s.New(piGVKList)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(aiObjList).To(BeAssignableToTypeOf(&triggersv1.AITriggerList{}))
+			Expect(piObjList).To(BeAssignableToTypeOf(&triggersv1.PiTriggerList{}))
 		})
 	})
 
@@ -109,7 +94,6 @@ var _ = Describe("API v1 Types", func() {
 			copy := original.DeepCopy()
 			Expect(copy.Name).To(Equal("original"))
 
-			// Mutate copy — original should be unchanged
 			copy.Name = "copy"
 			copy.Spec.EventType[0] = triggersv1.EventTypeDeleted
 
@@ -125,11 +109,7 @@ var _ = Describe("API v1 Types", func() {
 
 	Describe("HTTPTriggerList DeepCopy", func() {
 		It("produces an independent copy", func() {
-			original := &triggersv1.HTTPTriggerList{
-				Items: []triggersv1.HTTPTrigger{
-					{},
-				},
-			}
+			original := &triggersv1.HTTPTriggerList{Items: []triggersv1.HTTPTrigger{{}}}
 			original.Items[0].Name = "item0"
 
 			copy := original.DeepCopyObject()
@@ -141,40 +121,47 @@ var _ = Describe("API v1 Types", func() {
 		})
 	})
 
-	Describe("AITrigger DeepCopy", func() {
+	Describe("PiTrigger DeepCopy", func() {
 		It("produces an independent copy", func() {
-			temperature := "0.5"
-			original := &triggersv1.AITrigger{}
-			original.Name = "original-ai"
-			original.Spec.Request.Model = "gpt-4o-mini"
-			original.Spec.Request.PromptTemplate = "{{ .metadata.name }}"
-			original.Spec.Request.Temperature = &temperature
+			backoffLimit := int32(3)
+			original := &triggersv1.PiTrigger{}
+			original.Name = "original-pi"
+			original.Spec.Agent.Image = "ghcr.io/example/pi-runner:latest"
+			original.Spec.Agent.ConfigSecretRef = corev1.LocalObjectReference{Name: "pi-agent-config"}
+			original.Spec.Agent.PromptsConfigMapRef = corev1.LocalObjectReference{Name: "pi-agent-prompts"}
+			original.Spec.Agent.SkillsConfigMapRef = corev1.LocalObjectReference{Name: "pi-agent-skills"}
+			original.Spec.Agent.Env = []corev1.EnvVar{{Name: "PI_PROVIDER", Value: "openai"}}
+			original.Spec.Agent.Extensions = []string{"npm:pi-graft"}
+			original.Spec.Agent.NoExtensions = true
+			original.Spec.Agent.BackoffLimit = &backoffLimit
 
 			copy := original.DeepCopy()
-			Expect(copy.Name).To(Equal("original-ai"))
-			Expect(copy.Spec.Request.Temperature).NotTo(BeNil())
+			Expect(copy.Name).To(Equal("original-pi"))
+			Expect(copy.Spec.Agent.BackoffLimit).NotTo(BeNil())
 
-			copy.Name = "copy-ai"
-			*copy.Spec.Request.Temperature = "0.8"
+			copy.Name = "copy-pi"
+			*copy.Spec.Agent.BackoffLimit = 5
+			copy.Spec.Agent.Env[0].Value = "anthropic"
+			copy.Spec.Agent.Extensions[0] = "npm:custom"
 
-			Expect(original.Name).To(Equal("original-ai"))
-			Expect(*original.Spec.Request.Temperature).To(Equal("0.5"))
+			Expect(original.Name).To(Equal("original-pi"))
+			Expect(*original.Spec.Agent.BackoffLimit).To(Equal(int32(3)))
+			Expect(original.Spec.Agent.Env[0].Value).To(Equal("openai"))
+			Expect(original.Spec.Agent.Extensions[0]).To(Equal("npm:pi-graft"))
 		})
 	})
 
-	Describe("AITriggerList DeepCopy", func() {
+	Describe("PiTriggerList DeepCopy", func() {
 		It("produces an independent copy", func() {
-			original := &triggersv1.AITriggerList{
-				Items: []triggersv1.AITrigger{{}},
-			}
-			original.Items[0].Name = "ai-item0"
+			original := &triggersv1.PiTriggerList{Items: []triggersv1.PiTrigger{{}}}
+			original.Items[0].Name = "pi-item0"
 
 			copy := original.DeepCopyObject()
 			Expect(copy).NotTo(BeNil())
 
-			list, ok := copy.(*triggersv1.AITriggerList)
+			list, ok := copy.(*triggersv1.PiTriggerList)
 			Expect(ok).To(BeTrue())
-			Expect(list.Items[0].Name).To(Equal("ai-item0"))
+			Expect(list.Items[0].Name).To(Equal("pi-item0"))
 		})
 	})
 
