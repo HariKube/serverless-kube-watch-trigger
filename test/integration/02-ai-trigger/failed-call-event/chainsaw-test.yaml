@@ -61,6 +61,11 @@ spec:
                   - /app/server.py
                   ports:
                   - containerPort: 8080
+                  readinessProbe:
+                    tcpSocket:
+                      port: 8080
+                    initialDelaySeconds: 1
+                    periodSeconds: 2
                   volumeMounts:
                   - name: script
                     mountPath: /app
@@ -132,6 +137,8 @@ spec:
           metadata:
             name: ai-trigger-failure
             namespace: ai-trigger-failure
+    - sleep:
+        duration: 2s
   - name: Create watched ConfigMap
     try:
     - apply:
