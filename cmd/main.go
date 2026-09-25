@@ -74,6 +74,8 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var maxConcurrentReconciles int
+	var httpTriggerMaxConcurrentReconciles int
+	var piTriggerMaxConcurrentReconciles int
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -88,8 +90,14 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
-		"The maximum number of concurrent Reconciles which can be run. "+
+		"The default maximum number of concurrent Reconciles which can be run by each controller. "+
 			"Defaults to 1 to preserve ordering of events. Increase this value to improve throughput if needed.")
+	flag.IntVar(&httpTriggerMaxConcurrentReconciles, "httptrigger-max-concurrent-reconciles", -1,
+		"The maximum number of concurrent Reconciles which can be run by the HTTPTrigger controller. "+
+			"Defaults to --max-concurrent-reconciles when unset.")
+	flag.IntVar(&piTriggerMaxConcurrentReconciles, "pitrigger-max-concurrent-reconciles", -1,
+		"The maximum number of concurrent Reconciles which can be run by the PiTrigger controller. "+
+			"Defaults to --max-concurrent-reconciles when unset.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -106,6 +114,13 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if httpTriggerMaxConcurrentReconciles < 0 {
+		httpTriggerMaxConcurrentReconciles = maxConcurrentReconciles
+	}
+	if piTriggerMaxConcurrentReconciles < 0 {
+		piTriggerMaxConcurrentReconciles = maxConcurrentReconciles
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -275,7 +290,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
 	}
-	if err := httpReconciler.SetupWithManager(ctx, mgr, maxConcurrentReconciles, &wg); err != nil {
+	if err := httpReconciler.SetupWithManager(ctx, mgr, httpTriggerMaxConcurrentReconciles, &wg); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
 		os.Exit(1)
 	}
@@ -289,7 +304,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		DynamicClient: dynamicKubeClient,
 	}
-	if err := piReconciler.SetupWithManager(ctx, mgr, maxConcurrentReconciles, &wg); err != nil {
+	if err := piReconciler.SetupWithManager(ctx, mgr, piTriggerMaxConcurrentReconciles, &wg); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PiTrigger")
 		os.Exit(1)
 	}
