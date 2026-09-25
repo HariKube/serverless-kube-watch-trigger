@@ -31,6 +31,9 @@ type PiTriggerJobReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=delete;get
 
 func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	recordReconcileStart(metricControllerPiTriggerJob)
+	defer recordReconcileDone(metricControllerPiTriggerJob)
+
 	logger := logf.FromContext(ctx).WithValues("controller", "pitrigger-job", "job", req.NamespacedName)
 
 	job := &batchv1.Job{}
@@ -121,6 +124,7 @@ func derivePiJobResult(job *batchv1.Job) (failed bool, terminal bool, reason str
 }
 
 func (r *PiTriggerJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	recordControllerRegistered(metricControllerPiTriggerJob)
 	labelSelector, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			piTriggerManagedLabel: "true",

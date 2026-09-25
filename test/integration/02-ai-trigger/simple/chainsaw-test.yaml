@@ -19,7 +19,7 @@ spec:
     - script:
         content: |
           set -euo pipefail
-          IMAGE="ghcr.io/harikube/pi-runner:latest"
+          IMAGE="docker.io/mhmxs/pi-agent-empty:latest"
 
           cat <<EOF | kubectl apply -f -
           apiVersion: v1

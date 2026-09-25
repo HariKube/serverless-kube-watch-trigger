@@ -26,6 +26,7 @@ type piTriggerJobCounterRegistry struct {
 }
 
 type piTriggerJobCounter struct {
+	key               string
 	mu                sync.Mutex
 	running           int
 	lastSync          time.Time
@@ -51,7 +52,7 @@ func (r *piTriggerJobCounterRegistry) get(key string) *piTriggerJobCounter {
 		return counter
 	}
 
-	counter := &piTriggerJobCounter{completedTerminal: map[ktypes.UID]struct{}{}}
+	counter := &piTriggerJobCounter{key: key, completedTerminal: map[ktypes.UID]struct{}{}}
 	r.counters[key] = counter
 
 	return counter
@@ -62,20 +63,20 @@ func (r *piTriggerJobCounterRegistry) remove(key string) {
 	defer r.mu.Unlock()
 
 	delete(r.counters, key)
+	deletePiTriggerRunningJobs(key)
 }
 
 func (r *piTriggerJobCounterRegistry) clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	for key := range r.counters {
+		deletePiTriggerRunningJobs(key)
+	}
 	r.counters = map[string]*piTriggerJobCounter{}
 }
 
 func (c *piTriggerJobCounter) reserveSlot(ctx context.Context, lister client.Client, trigger *triggersv1.PiTrigger, maxJobs int) (bool, int, error) {
-	if maxJobs <= 0 {
-		return true, 0, nil
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -97,17 +98,19 @@ func (c *piTriggerJobCounter) reserveSlot(ctx context.Context, lister client.Cli
 			}
 		}
 	}
+	setPiTriggerRunningJobs(c.key, c.running)
 
-	if c.running >= maxJobs {
+	if maxJobs > 0 && c.running >= maxJobs {
 		return false, c.running, nil
 	}
 
 	c.running++
+	setPiTriggerRunningJobs(c.key, c.running)
 
 	return true, c.running, nil
 }
 
-func (c *piTriggerJobCounter) releaseTerminalJob(job *batchv1.Job) int {
+func (c *piTriggerJobCounter) releaseTerminalJob(job *batchv1.Job) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -115,26 +118,24 @@ func (c *piTriggerJobCounter) releaseTerminalJob(job *batchv1.Job) int {
 		c.completedTerminal = map[ktypes.UID]struct{}{}
 	}
 	if _, ok := c.completedTerminal[job.UID]; ok {
-		return c.running
+		return
 	}
 
 	c.completedTerminal[job.UID] = struct{}{}
 	if c.running > 0 {
 		c.running--
 	}
-
-	return c.running
+	setPiTriggerRunningJobs(c.key, c.running)
 }
 
-func (c *piTriggerJobCounter) releaseReservedSlot() int {
+func (c *piTriggerJobCounter) releaseReservedSlot() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.running > 0 {
 		c.running--
 	}
-
-	return c.running
+	setPiTriggerRunningJobs(c.key, c.running)
 }
 
 func countActivePiTriggerJobs(ctx context.Context, lister client.Client, namespace, triggerName string) (int, map[ktypes.UID]struct{}, error) {

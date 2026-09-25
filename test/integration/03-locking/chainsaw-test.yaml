@@ -1,0 +1,242 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: annotation-locking
+spec:
+  timeouts:
+    exec: 6m
+  skipDelete: true
+  namespace: locking
+  steps:
+  - name: Prepare distributed-mode RBAC
+    try:
+    - apply:
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: serverless-kube-watch-trigger-distributed-role
+          rules:
+          - apiGroups:
+            - ""
+            resources:
+            - configmaps
+            verbs:
+            - get
+            - list
+            - watch
+            - create
+            - update
+            - patch
+    - apply:
+        resource:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: serverless-kube-watch-trigger-distributed-rolebinding
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: serverless-kube-watch-trigger-distributed-role
+          subjects:
+          - kind: ServiceAccount
+            name: serverless-kube-watch-trigger-controller-manager
+            namespace: serverless-kube-watch-trigger-system
+  - name: Enable annotation locking with multiple replicas
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          patch=$(cat <<'EOF'
+          {
+            "spec": {
+              "replicas": 2,
+              "template": {
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "manager",
+                      "args": [
+                        "--enable-leader-election=false",
+                        "--health-probe-bind-address=:8081"
+                      ],
+                      "env": [
+                        {
+                          "name": "POD_NAME",
+                          "valueFrom": {
+                            "fieldRef": {
+                              "fieldPath": "metadata.name"
+                            }
+                          }
+                        },
+                        {
+                          "name": "POD_NAMESPACE",
+                          "valueFrom": {
+                            "fieldRef": {
+                              "fieldPath": "metadata.namespace"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+          )
+          kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system \
+            --type=strategic \
+            -p "$patch"
+          kubectl rollout status deployment/serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --timeout=300s
+          kubectl wait --for=jsonpath='{.status.readyReplicas}'=2 \
+            deployment/serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --timeout=300s
+  - name: Create webhook backend
+    try:
+    - apply:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: locking-http-backend
+            namespace: locking
+            labels:
+              app: locking-http-backend
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: locking-http-backend
+            template:
+              metadata:
+                labels:
+                  app: locking-http-backend
+              spec:
+                containers:
+                - name: nginx
+                  image: nginx:latest
+                  ports:
+                  - containerPort: 80
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: locking-http-backend
+            namespace: locking
+          spec:
+            selector:
+              app: locking-http-backend
+            ports:
+            - protocol: TCP
+              port: 8894
+              targetPort: 80
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: locking-http-backend
+            namespace: locking
+          status:
+            readyReplicas: 1
+  - name: Create HTTPTrigger and verify lease is written then cleared
+    try:
+    - apply:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: locking-httptrigger
+            namespace: locking
+            labels:
+              triggers.harikube.info/distribution: item-1
+          spec:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+            - locking
+            labelSelectors:
+            - watch-e2e-locking=true
+            eventTypes:
+            - MODIFIED
+            lockDuration: 6s
+            url:
+              service:
+                name: locking-http-backend
+                namespace: locking
+                uri:
+                  static: "/"
+            method: GET
+    - script:
+        content: |
+          set -euo pipefail
+          seen=""
+          for _ in $(seq 1 80); do
+            annotation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}' 2>/dev/null || true)"
+            phase="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+            if [ -n "$annotation" ]; then
+              seen=1
+            fi
+            if [ -n "$seen" ] && [ "$phase" = "Running" ] && [ -z "$annotation" ]; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          echo "expected to observe the annotation lease being written and then cleared"
+          kubectl get httptrigger locking-httptrigger -n locking -o yaml
+          exit 1
+  - name: Hold an active lease and verify reconcile is requeued until expiry
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          before_last="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.status.lastGeneration}')"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          kubectl annotate httptrigger locking-httptrigger -n locking \
+            triggers.harikube.info/lock-timestamp="${now}" --overwrite
+          kubectl patch httptrigger locking-httptrigger -n locking --type=merge \
+            -p '{"spec":{"method":"POST"}}'
+
+          observed_requeue=""
+          for _ in $(seq 1 12); do
+            generation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.generation}')"
+            last_generation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.status.lastGeneration}')"
+            annotation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}' 2>/dev/null || true)"
+            if [ "$generation" != "$before_last" ] && [ "$last_generation" = "$before_last" ] && [ -n "$annotation" ]; then
+              observed_requeue=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ -z "$observed_requeue" ]; then
+            echo "expected generation change to remain pending while the lease is active"
+            kubectl get httptrigger locking-httptrigger -n locking -o yaml
+            exit 1
+          fi
+
+          for _ in $(seq 1 40); do
+            generation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.generation}')"
+            last_generation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.status.lastGeneration}')"
+            annotation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}' 2>/dev/null || true)"
+            if [ "$generation" = "$last_generation" ] && [ -z "$annotation" ]; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+
+          echo "expected reconcile to resume after the lease expired and clear the annotation"
+          kubectl get httptrigger locking-httptrigger -n locking -o yaml
+          exit 1
+  - name: Cleanup test
+    try:
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Namespace
+          name: locking

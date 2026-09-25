@@ -75,7 +75,7 @@ setup-test-integration: cleanup-test-integration ## Set up a Kind cluster for in
 		exit 1; \
 	}
 
-	$(KIND) create cluster --name $(KIND_CLUSTER)
+	$(KIND) create cluster --name $(KIND_CLUSTER) --config test/integration/kind-config.yaml
 
 	$(KUBECTL) wait --for=condition=Ready node/$(KIND_CLUSTER)-control-plane --timeout=120s
 
@@ -86,6 +86,7 @@ _test-integration:
 	TAG=$(TAG) $(CHAINSAW) test --test-dir test/integration/00-operator
 	$(CHAINSAW) test --test-dir test/integration/01-http-trigger
 	$(CHAINSAW) test --test-dir test/integration/02-ai-trigger
+	$(CHAINSAW) test --test-dir test/integration/03-scaling
 	$(MAKE) cleanup-test-integration
 
 .PHONY: cleanup-test-integration

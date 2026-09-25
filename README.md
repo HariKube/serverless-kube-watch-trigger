@@ -9,6 +9,21 @@ At its core, it watches selected Kubernetes resources (built-in or CRDs) using e
 
 Please follow the guide in the [release](https://github.com/HariKube/serverless-kube-watch-trigger/releases) section.
 
+## Documentation
+
+Additional operator documentation lives under [`docs/`](docs/):
+
+- [`docs/admission-webhook-setup.md`](docs/admission-webhook-setup.md) — reference setup for assigning stable `triggers.harikube.info/distribution` labels to `HTTPTrigger` and `PiTrigger` resources, including CEL `MutatingAdmissionPolicy` and `MutatingWebhookConfiguration` examples for distributed partition mode.
+
+### Multi-replica annotation lock
+
+Both `HTTPTrigger` and `PiTrigger` controllers support an optional annotation-based reconcile lease for multi-replica deployments:
+
+* `spec.lockDuration` enables the lease logic for that trigger when set to a non-zero duration.
+* The lease is stored on the trigger itself as `triggers.harikube.info/lock-timestamp` with an RFC3339 UTC timestamp.
+
+When enabled, a replica must atomically write the annotation before starting trigger work. If another replica already holds an unexpired lease, the reconcile is **not dropped**: it returns `reconcile.Result{RequeueAfter: remaining}` and retries after the remaining lease window. If two replicas race to acquire the lease, the loser requeues with a short backoff and re-evaluates. After a successful reconcile the controller clears the annotation; if a pod crashes mid-flight, the timestamp expires naturally so another replica can safely resume.
+
 ## Getting Started
 
 ### 📌 Overview
@@ -56,6 +71,7 @@ spec:
   eventFilter: 'ne .status.availableReplicas 0' # Optional
   concurrency: 5 # Optional
   sendInitialEvents: false # Optional
+  lockDuration: 45s # Optional, enables annotation locking for this trigger using a 45s lease
 
   # --- Endpoint ---
   url: # Select one option
@@ -140,6 +156,7 @@ spec:
 | `eventFilter`       | Go template expression evaluated on objects. Return true to trigger. |
 | `concurrency`       | Max parallel triggers.                                                                 |
 | `sendInitialEvents` | Whether to emit initial events for existing objects.                                   |
+| `lockDuration`      | Optional per-trigger annotation lease duration; a non-zero value enables annotation locking for that trigger. |
 
 ---
 
@@ -337,6 +354,7 @@ spec:
     - ADDED
     - MODIFIED
   eventFilter: 'ne .status.availableReplicas 0'
+  lockDuration: 45s
 
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
@@ -544,7 +562,7 @@ This is the easiest way to ship team-specific prompts, reusable skills, or per-e
 `PiTrigger` supports the same:
 
 * resource selection (`resource`, `namespaces`, `labelSelectors`, `fieldSelectors`, `eventTypes`, `eventFilter`)
-* watcher controls (`concurrency`, `sendInitialEvents`)
+* watcher controls (`concurrency`, `sendInitialEvents`, `lockDuration`)
 * status handling and automatic watcher restart behavior
 
 In addition, `spec.agent` defines the spawned worker Job:
@@ -697,7 +715,7 @@ We welcome and encourage contributions from the community! Whether it's a bug fi
 
 Before you get started, please take a moment to review our guidelines:
 
-- Read the Documentation: Familiarize yourself with the framework's architecture and existing features.
+- Read the Documentation: Start with this README and the additional documents under [`docs/`](docs/) to familiarize yourself with the operator's architecture and existing features.
 - Open an Issue: For any significant changes or new features, please open an issue first to discuss the idea. This helps prevent duplicated work and ensures alignment with the project's goals.
 - Fork the Repository: Fork the repository to your own GitHub account.
 - Create a Branch: Create a new branch for your feature or bug fix: git checkout -b feature-my-awesome-feature.

@@ -17,9 +17,12 @@ limitations under the License.
 package v1_test
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
 
@@ -174,6 +177,16 @@ var _ = Describe("API v1 Types", func() {
 		It("zero-value has false SendInitialEvents", func() {
 			ts := triggersv1.TriggerSpec{}
 			Expect(ts.SendInitialEvents).To(BeFalse())
+		})
+
+		It("deep-copies lock duration independently", func() {
+			original := &triggersv1.TriggerSpec{LockDuration: metav1.Duration{Duration: 7 * time.Second}}
+
+			copy := original.DeepCopy()
+			copy.LockDuration.Duration = 11 * time.Second
+
+			Expect(original.LockDuration.Duration).To(Equal(7 * time.Second))
+			Expect(copy.LockDuration.Duration).To(Equal(11 * time.Second))
 		})
 	})
 })

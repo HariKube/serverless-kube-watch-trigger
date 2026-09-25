@@ -427,6 +427,11 @@ spec:
                 items:
                   type: string
                 type: array
+              lockDuration:
+                description: LockDuration enables annotation-based reconcile leasing
+                  for this trigger when set to a non-zero duration.
+                format: duration
+                type: string
               maxJobs:
                 description: MaxJobs limits the number of active worker Jobs for this
                   trigger. Zero means unlimited.

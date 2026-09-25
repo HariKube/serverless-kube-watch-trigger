@@ -46,6 +46,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
+	triggerwatcher "github.com/harikube/serverless-kube-watch-trigger/pkg/watcher"
 )
 
 var ErrInvalidTriggerContent = errors.New("invalid trigger content")
@@ -68,6 +71,9 @@ type HTTPTriggerReconciler struct {
 	Scheme        *runtime.Scheme
 	DynamicClient *dynamic.DynamicClient
 	Recorder      record.EventRecorder
+
+	PartitionController *partition.Controller
+	DeletionWatcher     *triggerwatcher.GlobalDeletionWatcher
 
 	deliveryGateRegistry
 
@@ -112,6 +118,10 @@ func (r *HTTPTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) 
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
 		cancel()
 		delete(r.runningTriggers, triggerRefName)
+		recordControllerSessionStop(metricControllerHTTPTrigger)
+	}
+	if r.DeletionWatcher != nil {
+		r.DeletionWatcher.UnregisterTask(triggerRefName)
 	}
 }
 
@@ -132,6 +142,9 @@ func (r *HTTPTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) 
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	recordReconcileStart(metricControllerHTTPTrigger)
+	defer recordReconcileDone(metricControllerHTTPTrigger)
+
 	logger := logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", req.NamespacedName)
 
 	// Serialize reconcile work per trigger (never globally) so a trigger's
@@ -165,6 +178,11 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		r.remove(req.String())
 
 		return ctrl.Result{}, nil
+	}
+	if r.PartitionController != nil && !r.PartitionController.OwnsObject(&trigger) {
+		r.stopRunningTrigger(req.String())
+		r.remove(req.String())
+		return ctrl.Result{}, nil
 	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
 	} else {
@@ -173,6 +191,36 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		logger.Info("Trigger updated")
+	}
+
+	leaseAcquired := false
+	taskSucceeded := false
+	if lockDuration := trigger.Spec.LockDuration.Duration; lockDuration > 0 {
+		leaseResult, err := lease.TryAcquireLease(ctx, r.Client, &trigger, time.Now().UTC(), lockDuration)
+		if err != nil {
+			logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
+			return ctrl.Result{}, err
+		}
+		if leaseResult.RequeueAfter > 0 {
+			logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
+			return ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
+		}
+		if leaseResult.Conflict {
+			retryAfter := lease.ConflictRetryDelay()
+			logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
+			return ctrl.Result{RequeueAfter: retryAfter}, nil
+		}
+		leaseAcquired = leaseResult.Acquired
+	}
+	if leaseAcquired {
+		defer func() {
+			if !taskSucceeded {
+				return
+			}
+			if err := lease.ClearLease(ctx, r.Client, &trigger); err != nil {
+				logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
+			}
+		}()
 	}
 
 	r.stopRunningTrigger(req.String())
@@ -227,6 +275,8 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		return ctrl.Result{}, err
 	}
+
+	taskSucceeded = true
 
 	return ctrl.Result{}, nil
 }
@@ -290,6 +340,10 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	r.runningTriggersLock.Lock()
 	r.runningTriggers[triggerRefName] = cancel
 	r.runningTriggersLock.Unlock()
+	recordControllerSessionStart(metricControllerHTTPTrigger)
+	if r.DeletionWatcher != nil {
+		r.DeletionWatcher.RegisterTask(triggerRefName, cancel)
+	}
 
 	listOpts := buildWatcherListOptions(resourceVersion, trigger.Spec.SendInitialEvents, trigger.Spec.LabelSelector, trigger.Spec.FieldSelector)
 
@@ -371,7 +425,9 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	deliveryGate := r.get(triggerRefName)
 
 	for i := 1; i <= int(trigger.Spec.Concurrency); i++ {
+		recordWatcherGoroutineStart(metricControllerHTTPTrigger)
 		go func() {
+			defer recordWatcherGoroutineDone(metricControllerHTTPTrigger)
 			reconnectBackoff := minReconnectBackoff
 			reconnectWatchStream := func(reason string, activeWatchers []watch.Interface, activeGen uint64) bool {
 				stopWatchers(activeWatchers)
@@ -590,6 +646,18 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 
 	for _, trigger := range existingTriggers.Items {
 		refName := trigger.Namespace + "/" + trigger.Name
+		if r.PartitionController != nil && !r.PartitionController.OwnsObject(&trigger) {
+			r.stopRunningTrigger(refName)
+			r.remove(refName)
+			continue
+		}
+
+		r.runningTriggersLock.Lock()
+		_, alreadyRunning := r.runningTriggers[refName]
+		r.runningTriggersLock.Unlock()
+		if alreadyRunning {
+			continue
+		}
 
 		triggerMu := r.triggerLock(refName)
 		triggerMu.Lock()
@@ -624,10 +692,31 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 	r.runningTriggers = map[string]func(){}
 	r.triggerLocksLock = sync.Mutex{}
 	r.triggerLocks = map[string]*sync.Mutex{}
+	if r.DeletionWatcher == nil {
+		r.DeletionWatcher = triggerwatcher.NewGlobalDeletionWatcher()
+	}
+	if r.PartitionController == nil {
+		r.PartitionController = partition.NewSingleWorkerController()
+	}
+	if informer, err := mgr.GetCache().GetInformer(ctx, &triggersv1.HTTPTrigger{}); err != nil {
+		return err
+	} else if err := r.DeletionWatcher.Start(ctx, informer); err != nil {
+		return err
+	}
+	if r.PartitionController.Mode() == partition.ModeDistributedPartition {
+		r.PartitionController.AddChangeListener(func(listenerCtx context.Context) {
+			if err := r.WatchInit(listenerCtx); err != nil {
+				logf.FromContext(listenerCtx).Error(err, "distributed HTTPTrigger resync failed")
+			}
+		})
+	}
+
+	recordControllerRegistered(metricControllerHTTPTrigger)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer recordControllerStopped(metricControllerHTTPTrigger)
 
 		<-ctx.Done()
 

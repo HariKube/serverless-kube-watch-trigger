@@ -23,8 +23,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/client-go/kubernetes"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -49,6 +51,7 @@ import (
 
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 	"github.com/harikube/serverless-kube-watch-trigger/internal/controller"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -79,6 +82,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var partitionRefreshPeriod time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&namespace, "namespace", "", "The namespace the operator reacts on trigger events.")
 	flag.StringVar(&labelSelectors, "label-selectors", "", "The label selectors the operator reacts on trigger events.")
@@ -86,9 +90,16 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	flag.BoolVar(
+		&enableLeaderElection,
+		"enable-leader-election",
+		true,
 		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
+			"When true, the elected leader runs single-worker mode; when false, all replicas "+
+			"participate in distributed partition mode.",
+	)
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
+		"Deprecated alias for --enable-leader-election.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
 		"The default maximum number of concurrent Reconciles which can be run by each controller. "+
 			"Defaults to 1 to preserve ordering of events. Increase this value to improve throughput if needed.")
@@ -98,6 +109,9 @@ func main() {
 	flag.IntVar(&piTriggerMaxConcurrentReconciles, "pitrigger-max-concurrent-reconciles", -1,
 		"The maximum number of concurrent Reconciles which can be run by the PiTrigger controller. "+
 			"Defaults to --max-concurrent-reconciles when unset.")
+	flag.DurationVar(&partitionRefreshPeriod, "partition-refresh-period", 4*time.Minute,
+		"How often distributed-mode replicas refresh and wipe/reclaim their ConfigMap partition state. "+
+			"The missing-event panic timeout is always kept greater than this period.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -274,6 +288,11 @@ func main() {
 		setupLog.Error(err, "unable to create dynamic kube client")
 		os.Exit(1)
 	}
+	kubeClientset, err := kubernetes.NewForConfig(ctrl.GetConfigOrDie())
+	if err != nil {
+		setupLog.Error(err, "unable to create kube clientset")
+		os.Exit(1)
+	}
 
 	ctx := ctrl.SetupSignalHandler()
 	wg := sync.WaitGroup{}
@@ -285,10 +304,25 @@ func main() {
 		cancel()
 	}()
 
+	partitionController := partition.NewSingleWorkerController()
+	if !enableLeaderElection {
+		partitionController = partition.NewDistributedControllerWithOptions(
+			kubeClientset,
+			os.Getenv("POD_NAMESPACE"),
+			os.Getenv("POD_NAME"),
+			partition.Options{ClaimRefreshInterval: partitionRefreshPeriod},
+		)
+	}
+	if err := mgr.Add(partitionController); err != nil {
+		setupLog.Error(err, "unable to add partition controller")
+		os.Exit(1)
+	}
+
 	httpReconciler := &controller.HTTPTriggerReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		DynamicClient: dynamicKubeClient,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		DynamicClient:       dynamicKubeClient,
+		PartitionController: partitionController,
 	}
 	if err := httpReconciler.SetupWithManager(ctx, mgr, httpTriggerMaxConcurrentReconciles, &wg); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HTTPTrigger")
@@ -300,9 +334,10 @@ func main() {
 	}
 
 	piReconciler := &controller.PiTriggerReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		DynamicClient: dynamicKubeClient,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		DynamicClient:       dynamicKubeClient,
+		PartitionController: partitionController,
 	}
 	if err := piReconciler.SetupWithManager(ctx, mgr, piTriggerMaxConcurrentReconciles, &wg); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PiTrigger")

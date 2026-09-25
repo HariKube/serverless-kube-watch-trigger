@@ -21,9 +21,10 @@ spec:
   concurrency: 2
   maxJobs: 4
   sendInitialEvents: false
+  lockDuration: 45s
 
   agent:
-    image: ghcr.io/harikube/pi-runner:latest
+    image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:
       name: pi-agent-config
     promptsConfigMapRef:

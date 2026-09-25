@@ -66,6 +66,11 @@ type TriggerSpec struct {
 	// +kubebuilder:default:=false
 	// SendInitialEvents represents initial object state triggers.
 	SendInitialEvents bool `json:"sendInitialEvents,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Format=duration
+	// LockDuration enables annotation-based reconcile leasing for this trigger when set to a non-zero duration.
+	LockDuration metav1.Duration `json:"lockDuration,omitempty"`
 }
 
 // HTTP represents HTTP based trigger details.

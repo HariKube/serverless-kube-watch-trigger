@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,6 +44,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
 )
 
 // drainRunningTriggers stops every running trigger and clears the registry.
@@ -68,6 +71,7 @@ func newReconciler() *HTTPTriggerReconciler {
 		DynamicClient:       dynamicClient,
 		Scheme:              k8sClient.Scheme(),
 		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
 		ctx:                 ctx,
 		runningTriggersLock: sync.Mutex{},
 		runningTriggers:     map[string]func(){},
@@ -1194,9 +1198,10 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 				Spec: triggersv1.HTTPTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{
-						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
-						Namespaces: []string{ns},
-						EventType:  []triggersv1.EventType{triggersv1.EventTypeAdded},
+						Resource:      metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces:    []string{ns},
+						FieldSelector: []string{fmt.Sprintf("metadata.name=%s", name+"-cm2")},
+						EventType:     []triggersv1.EventType{triggersv1.EventTypeAdded},
 					},
 					HTTP: triggersv1.HTTP{
 						URL:    triggersv1.URL{Static: ptr.To(srv.URL + "/hook")},
@@ -1560,6 +1565,125 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			// The pre-existing source configmap is delivered once per session.
 			Eventually(func() int32 { return calls.Load() }, 30*time.Second, 200*time.Millisecond).
 				Should(BeNumerically(">=", count))
+		})
+	})
+
+	Context("Annotation lease", func() {
+		It("requeues while an active annotation lease is present using the trigger-specific lock duration", func() {
+			const (
+				name                = "httptrigger-active-lease"
+				triggerLockDuration = 5 * time.Second
+			)
+			lockedAt := time.Now().UTC()
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: ns,
+					Annotations: map[string]string{
+						lease.AnnotationKey: lockedAt.Format(time.RFC3339),
+					},
+				},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:     metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces:   []string{ns},
+						LockDuration: metav1.Duration{Duration: triggerLockDuration},
+					},
+					HTTP: triggersv1.HTTP{URL: triggersv1.URL{Static: ptr.To("http://example.invalid")}, Method: "POST"},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+
+			r := newReconciler()
+
+			result, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(result.RequeueAfter).To(BeNumerically("<=", triggerLockDuration))
+
+			r.runningTriggersLock.Lock()
+			_, running := r.runningTriggers[ns+"/"+name]
+			r.runningTriggersLock.Unlock()
+			Expect(running).To(BeFalse())
+		})
+
+		It("clears the annotation lease after a successful reconcile", func() {
+			const name = "httptrigger-clear-lease"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:     metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces:   []string{ns},
+						LockDuration: metav1.Duration{Duration: 30 * time.Second},
+					},
+					HTTP: triggersv1.HTTP{URL: triggersv1.URL{Static: ptr.To(srv.URL)}, Method: "POST"},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+
+			r := newReconciler()
+
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				updated := &triggersv1.HTTPTrigger{}
+				g.Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
+	})
+
+	Context("Distributed ownership", func() {
+		It("skips unloved partitions when distributed mode does not own the trigger label", func() {
+			clientset := fake.NewSimpleClientset(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: partition.DefaultConfigMapName, Namespace: ns},
+				Data: map[string]string{
+					"heartbeat/pod-a":  time.Now().UTC().Format(time.RFC3339),
+					"heartbeat/pod-b":  time.Now().UTC().Format(time.RFC3339),
+					"partition/item-1": "pod-b",
+					"partition/item-2": "pod-b",
+				},
+			})
+			partitionController := partition.NewDistributedController(clientset, ns, "pod-a")
+			Expect(partitionController.Refresh(bgCtx)).To(Succeed())
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "httptrigger-unowned-partition",
+					Namespace: ns,
+					Labels:    map[string]string{partition.DistributionLabelKey: "item-99"},
+				},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+						EventType:  []triggersv1.EventType{triggersv1.EventTypeAdded},
+					},
+					HTTP: triggersv1.HTTP{URL: triggersv1.URL{Static: ptr.To("http://example.invalid")}, Method: "POST"},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			DeferCleanup(func() { cleanupTrigger(bgCtx, trigger.Name) })
+
+			r := newReconciler()
+			r.PartitionController = partitionController
+
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: trigger.Name, Namespace: ns}})
+			Expect(err).NotTo(HaveOccurred())
+
+			r.runningTriggersLock.Lock()
+			defer r.runningTriggersLock.Unlock()
+			Expect(r.runningTriggers).NotTo(HaveKey(ns + "/" + trigger.Name))
 		})
 	})
 })

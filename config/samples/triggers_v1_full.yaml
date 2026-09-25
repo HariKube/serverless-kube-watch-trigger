@@ -22,6 +22,7 @@ spec:
   eventFilter: 'ne .old.status.availableReplicas .new.status.availableReplicas'
   concurrency: 5
   sendInitialEvents: false
+  lockDuration: 45s
   url:
     static: "https://example.com/hook"
     # template: "https://example.com/hook/{{ .metadata.name }}"

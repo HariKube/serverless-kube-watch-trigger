@@ -32,6 +32,10 @@ const (
 
 	metricFailureReasonRequest = "request"
 	metricFailureReasonStatus  = "status"
+
+	metricControllerHTTPTrigger  = "httptrigger"
+	metricControllerPiTrigger    = "pitrigger"
+	metricControllerPiTriggerJob = "pitrigger-job"
 )
 
 // Per-trigger delivery metrics. They are registered on the controller-runtime
@@ -75,6 +79,34 @@ var (
 		Name:      "backoffs_total",
 		Help:      "Total number of times a delivery was delayed because the endpoint was under sustained failure.",
 	}, []string{"kind", "trigger"})
+
+	controllersRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "runtime",
+		Name:      "controllers_running",
+		Help:      "Number of active controller sessions or controller workers currently running, by controller.",
+	}, []string{"controller"})
+
+	reconcilesRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "runtime",
+		Name:      "reconciles_running",
+		Help:      "Number of in-flight reconcile calls currently running, by controller.",
+	}, []string{"controller"})
+
+	watcherGoroutinesRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "runtime",
+		Name:      "watcher_goroutines_running",
+		Help:      "Number of watcher goroutines currently running, by controller.",
+	}, []string{"controller"})
+
+	piTriggerRunningJobs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "runtime",
+		Name:      "pitrigger_jobs_running",
+		Help:      "Number of Pi worker Jobs currently running or reserved for dispatch, per trigger.",
+	}, []string{"trigger"})
 )
 
 func init() {
@@ -84,6 +116,10 @@ func init() {
 		deliveryCallDurationSeconds,
 		deliveryRetriesTotal,
 		deliveryBackoffsTotal,
+		controllersRunning,
+		reconcilesRunning,
+		watcherGoroutinesRunning,
+		piTriggerRunningJobs,
 	)
 }
 
@@ -110,4 +146,46 @@ func recordDeliveryRetry(kind, trigger, method, result string) {
 // sustained-failure backoff strategy.
 func recordDeliveryBackoff(kind, trigger string) {
 	deliveryBackoffsTotal.WithLabelValues(kind, trigger).Inc()
+}
+
+func recordControllerRegistered(controller string) {
+	controllersRunning.WithLabelValues(controller).Set(1)
+}
+
+func recordControllerStopped(controller string) {
+	controllersRunning.WithLabelValues(controller).Set(0)
+	reconcilesRunning.WithLabelValues(controller).Set(0)
+	watcherGoroutinesRunning.WithLabelValues(controller).Set(0)
+}
+
+func recordControllerSessionStart(controller string) {
+	controllersRunning.WithLabelValues(controller).Inc()
+}
+
+func recordControllerSessionStop(controller string) {
+	controllersRunning.WithLabelValues(controller).Dec()
+}
+
+func recordReconcileStart(controller string) {
+	reconcilesRunning.WithLabelValues(controller).Inc()
+}
+
+func recordReconcileDone(controller string) {
+	reconcilesRunning.WithLabelValues(controller).Dec()
+}
+
+func recordWatcherGoroutineStart(controller string) {
+	watcherGoroutinesRunning.WithLabelValues(controller).Inc()
+}
+
+func recordWatcherGoroutineDone(controller string) {
+	watcherGoroutinesRunning.WithLabelValues(controller).Dec()
+}
+
+func setPiTriggerRunningJobs(trigger string, running int) {
+	piTriggerRunningJobs.WithLabelValues(trigger).Set(float64(running))
+}
+
+func deletePiTriggerRunningJobs(trigger string) {
+	piTriggerRunningJobs.DeleteLabelValues(trigger)
 }
