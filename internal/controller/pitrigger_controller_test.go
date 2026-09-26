@@ -242,6 +242,52 @@ var _ = Describe("PiTrigger Controller", func() {
 				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
 			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 		})
+
+		It("clears a stale annotation lease even when the trigger is already running", func() {
+			createPiAgentConfigSecret(bgCtx, secretName)
+			createPiAgentConfigMaps(bgCtx, promptsCMName, skillsCMName)
+
+			staleLockedAt := time.Now().UTC().Add(-time.Minute)
+			trigger := &triggersv1.PiTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: ns,
+					Annotations: map[string]string{
+						lease.AnnotationKey: staleLockedAt.Format(time.RFC3339),
+					},
+				},
+				Spec: triggersv1.PiTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:     metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces:   []string{ns},
+						LockDuration: metav1.Duration{Duration: 5 * time.Second},
+					},
+					Agent: triggersv1.PiAgentSpec{
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
+						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
+						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
+						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
+					},
+				},
+				Status: triggersv1.PiTriggerStatus{Phase: triggersv1.TriggerPhaseRunning, LastGeneration: 1},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			Expect(k8sClient.Status().Update(bgCtx, trigger)).To(Succeed())
+
+			r := newPiReconciler()
+
+			result, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			Eventually(func(g Gomega) {
+				updated := &triggersv1.PiTrigger{}
+				g.Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+				g.Expect(updated.Status.LastGeneration).To(Equal(updated.Generation))
+				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
 	})
 
 	Context("watcher error handling", func() {

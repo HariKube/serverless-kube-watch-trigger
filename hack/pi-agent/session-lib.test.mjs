@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildDefaultsPrefix,
+  decideSubagentStrategy,
   extractSubAgentDefaults,
   prepareSessionHibernation,
   processSessionWakeup
@@ -32,6 +33,40 @@ test('extractSubAgentDefaults decodes and strips the prompt prefix', () => {
   assert.equal(result.cleanedPrompt, 'Do the work.');
   assert.equal(result.subAgentDefaults.namespace, 'demo');
   assert.equal(result.subAgentDefaults.maxParallel, 3);
+});
+
+test('decideSubagentStrategy recommends staying local for short single-stream work', () => {
+  const result = decideSubagentStrategy({
+    task: 'Update one sentence in a markdown file',
+    proposedAction: 'stay-local',
+    estimatedSteps: 3,
+    estimatedMinutes: 1,
+    independentWorkUnits: 1,
+    maxParallel: 4
+  });
+
+  assert.equal(result.recommendedAction, 'stay-local');
+  assert.equal(result.approved, true);
+  assert.equal(result.recommendedWorkers, 0);
+  assert.equal(result.confidence, 'high');
+  assert.equal(result.checks.at(-1)?.status, 'pass');
+});
+
+test('decideSubagentStrategy rejects keeping large parallel work local', () => {
+  const result = decideSubagentStrategy({
+    task: 'Investigate, implement, and verify a multi-part production bug across separate areas',
+    proposedAction: 'stay-local',
+    estimatedSteps: 9,
+    estimatedMinutes: 12,
+    independentWorkUnits: 3,
+    maxParallel: 2
+  });
+
+  assert.equal(result.recommendedAction, 'delegate');
+  assert.equal(result.approved, false);
+  assert.equal(result.recommendedWorkers, 2);
+  assert.match(result.reason, /delegate/i);
+  assert.equal(result.checks.some(check => check.status === 'pass' && /parallel/i.test(check.message)), true);
 });
 
 test('prepareSessionHibernation builds context and manifests for pending workers', () => {

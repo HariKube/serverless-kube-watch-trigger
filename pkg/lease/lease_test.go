@@ -115,6 +115,22 @@ func TestTryAcquireLeaseReturnsRemainingDurationForActiveLease(t *testing.T) {
 	}
 }
 
+func TestActiveLeaseRemainingReturnsZeroWhenExpired(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 2, 3, 4, 20, 0, time.UTC)
+	lockedAt := now.Add(-10 * time.Second)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{
+			AnnotationKey: lockedAt.Format(time.RFC3339),
+		},
+	}}
+
+	if got := ActiveLeaseRemaining(cm, now, 5*time.Second); got != 0 {
+		t.Fatalf("expected expired lease to report zero remaining duration, got %s", got)
+	}
+}
+
 func TestTryAcquireLeaseReportsConflict(t *testing.T) {
 	t.Parallel()
 

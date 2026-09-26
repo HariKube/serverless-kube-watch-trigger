@@ -149,11 +149,12 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	defer recordReconcileDone(metricControllerHTTPTrigger)
 
 	logger := logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", req.NamespacedName)
+	triggerRefName := req.String()
 
 	// Serialize reconcile work per trigger (never globally) so a trigger's
 	// watcher session is created/updated/deleted atomically while triggers
 	// reconcile against each other in parallel.
-	triggerMu := r.triggerLock(req.String())
+	triggerMu := r.triggerLock(triggerRefName)
 	triggerMu.Lock()
 	defer triggerMu.Unlock()
 
@@ -163,61 +164,28 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// The trigger was deleted without a finalizer and is already gone.
 			// Make sure its watcher session is cancelled and the map entry is
 			// removed so it cannot keep delivering events as a zombie.
-			r.stopRunningTrigger(req.String())
-			r.remove(req.String())
-
+			r.stopRunningTrigger(triggerRefName)
+			r.remove(triggerRefName)
 			return ctrl.Result{}, nil
 		}
 
 		logger.Error(err, "Trigger fetch failed")
-
 		return ctrl.Result{}, err
 	}
 
-	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
-		logger.Info("Trigger deleted")
-		if err := r.deliverOwnerLeaseTimeoutCallback(ctx, logger, req.String(), &trigger); err != nil {
-			logger.Error(err, "Trigger deletion timeout callback failed")
-		}
-
-		r.stopRunningTrigger(req.String())
-		r.remove(req.String())
-
-		return ctrl.Result{}, nil
-	}
-	if r.PartitionController != nil && !r.PartitionController.OwnsObject(&trigger) {
-		r.stopRunningTrigger(req.String())
-		r.remove(req.String())
-		return ctrl.Result{}, nil
-	} else if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
-		logger.Info("Trigger created")
-	} else {
-		if trigger.Status.Phase == triggersv1.TriggerPhaseRunning && trigger.Status.LastGeneration == trigger.Generation {
-			return ctrl.Result{}, nil
-		}
-
-		logger.Info("Trigger updated")
+	if result, done, err := r.preflightReconcile(ctx, logger, triggerRefName, &trigger); done || err != nil {
+		return result, err
 	}
 
-	leaseAcquired := false
-	taskSucceeded := false
-	if lockDuration := trigger.Spec.LockDuration.Duration; lockDuration > 0 {
-		leaseResult, err := lease.TryAcquireLease(ctx, r.Client, &trigger, time.Now().UTC(), lockDuration)
-		if err != nil {
-			logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
+	leaseAcquired, result, err := r.acquireReconcileLease(ctx, logger, &trigger)
+	if err != nil || result != nil {
+		if result == nil {
 			return ctrl.Result{}, err
 		}
-		if leaseResult.RequeueAfter > 0 {
-			logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
-			return ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
-		}
-		if leaseResult.Conflict {
-			retryAfter := lease.ConflictRetryDelay()
-			logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
-			return ctrl.Result{RequeueAfter: retryAfter}, nil
-		}
-		leaseAcquired = leaseResult.Acquired
+		return *result, err
 	}
+
+	taskSucceeded := false
 	if leaseAcquired {
 		defer func() {
 			if !taskSucceeded {
@@ -229,7 +197,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}()
 	}
 
-	r.stopRunningTrigger(req.String())
+	r.stopRunningTrigger(triggerRefName)
 
 	recoveryRestart := !trigger.Status.ErrorTime.IsZero() &&
 		trigger.Status.LastGeneration == trigger.Generation
@@ -237,7 +205,7 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
 
-	if err := r.createTrigger(req.String(), &trigger); err != nil {
+	if err := r.createTrigger(triggerRefName, &trigger); err != nil {
 		permanent := errors.Is(err, ErrInvalidTriggerContent)
 		if !permanent {
 			logger.Error(err, "Trigger initialization failed")
@@ -254,7 +222,6 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 
 			logger.Error(err, "Trigger status update failed")
-
 			return ctrl.Result{}, err
 		}
 
@@ -278,13 +245,80 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		logger.Error(err, "Trigger status update failed")
-
 		return ctrl.Result{}, err
 	}
 
 	taskSucceeded = true
-
 	return ctrl.Result{}, nil
+}
+
+func (r *HTTPTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) (ctrl.Result, bool, error) {
+	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
+		logger.Info("Trigger deleted")
+		if err := r.deliverOwnerLeaseTimeoutCallback(ctx, logger, triggerRefName, trigger); err != nil {
+			logger.Error(err, "Trigger deletion timeout callback failed")
+		}
+		r.stopRunningTrigger(triggerRefName)
+		r.remove(triggerRefName)
+		return ctrl.Result{}, true, nil
+	}
+	if r.PartitionController != nil && !r.PartitionController.OwnsObject(trigger) {
+		r.stopRunningTrigger(triggerRefName)
+		r.remove(triggerRefName)
+		return ctrl.Result{}, true, nil
+	}
+	if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
+		logger.Info("Trigger created")
+		return ctrl.Result{}, false, nil
+	}
+	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning && trigger.Status.LastGeneration == trigger.Generation {
+		result, err := r.handleRunningTriggerLease(ctx, logger, trigger)
+		return result, true, err
+	}
+
+	logger.Info("Trigger updated")
+	return ctrl.Result{}, false, nil
+}
+
+func (r *HTTPTriggerReconciler) handleRunningTriggerLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.HTTPTrigger) (ctrl.Result, error) {
+	lockDuration := trigger.Spec.LockDuration.Duration
+	if lockDuration <= 0 {
+		return ctrl.Result{}, nil
+	}
+	if requeueAfter := lease.ActiveLeaseRemaining(trigger, time.Now().UTC(), lockDuration); requeueAfter > 0 {
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+	if _, ok := trigger.GetAnnotations()[lease.AnnotationKey]; !ok {
+		return ctrl.Result{}, nil
+	}
+	if err := lease.ClearLease(ctx, r.Client, trigger); err != nil {
+		logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *HTTPTriggerReconciler) acquireReconcileLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.HTTPTrigger) (bool, *ctrl.Result, error) {
+	lockDuration := trigger.Spec.LockDuration.Duration
+	if lockDuration <= 0 {
+		return false, nil, nil
+	}
+
+	leaseResult, err := lease.TryAcquireLease(ctx, r.Client, trigger, time.Now().UTC(), lockDuration)
+	if err != nil {
+		logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
+		return false, nil, err
+	}
+	if leaseResult.RequeueAfter > 0 {
+		logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
+		return false, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
+	}
+	if leaseResult.Conflict {
+		retryAfter := lease.ConflictRetryDelay()
+		logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
+		return false, &ctrl.Result{RequeueAfter: retryAfter}, nil
+	}
+	return leaseResult.Acquired, nil, nil
 }
 
 func (r *HTTPTriggerReconciler) deliverOwnerLeaseTimeoutCallback(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) error {

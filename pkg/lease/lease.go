@@ -38,6 +38,10 @@ func ConflictRetryDelay() time.Duration {
 	return time.Second + time.Duration(rand.IntN(1000))*time.Millisecond
 }
 
+func ActiveLeaseRemaining(obj client.Object, now time.Time, lockDuration time.Duration) time.Duration {
+	return activeLeaseRemaining(obj, now, NormalizeDuration(lockDuration))
+}
+
 func TryAcquireLease(
 	ctx context.Context,
 	cl client.Client,
@@ -51,7 +55,7 @@ func TryAcquireLease(
 		return TryAcquireResult{}, err
 	}
 
-	if requeueAfter := activeLeaseRemaining(latest, now, lockDuration); requeueAfter > 0 {
+	if requeueAfter := ActiveLeaseRemaining(latest, now, lockDuration); requeueAfter > 0 {
 		return TryAcquireResult{RequeueAfter: requeueAfter}, nil
 	}
 

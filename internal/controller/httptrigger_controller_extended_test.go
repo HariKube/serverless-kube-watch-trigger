@@ -1744,6 +1744,51 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
 			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 		})
+
+		It("clears a stale annotation lease even when the trigger is already running", func() {
+			const name = "httptrigger-clear-stale-lease"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			staleLockedAt := time.Now().UTC().Add(-time.Minute)
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: ns,
+					Annotations: map[string]string{
+						lease.AnnotationKey: staleLockedAt.Format(time.RFC3339),
+					},
+				},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:     metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces:   []string{ns},
+						LockDuration: metav1.Duration{Duration: 5 * time.Second},
+					},
+					HTTP: triggersv1.HTTP{URL: triggersv1.URL{Static: ptr.To(srv.URL)}, Method: "POST"},
+				},
+				Status: triggersv1.TriggerStatus{Phase: triggersv1.TriggerPhaseRunning, LastGeneration: 1},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+			Expect(k8sClient.Status().Update(bgCtx, trigger)).To(Succeed())
+
+			r := newReconciler()
+
+			result, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			Eventually(func(g Gomega) {
+				updated := &triggersv1.HTTPTrigger{}
+				g.Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+				g.Expect(updated.Status.LastGeneration).To(Equal(updated.Generation))
+				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
+			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
 	})
 
 	Context("Distributed ownership", func() {

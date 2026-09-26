@@ -46,6 +46,28 @@ function ensureInteger(value, label, { min, max } = {}) {
   return parsed;
 }
 
+function ensureNumber(value, label, { min, max } = {}) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${label} must be a finite number`);
+  }
+  if (min !== undefined && parsed < min) {
+    throw new Error(`${label} must be >= ${min}`);
+  }
+  if (max !== undefined && parsed > max) {
+    throw new Error(`${label} must be <= ${max}`);
+  }
+  return parsed;
+}
+
+function ensureOneOf(value, label, allowed) {
+  const normalized = ensureString(value, label);
+  if (!allowed.includes(normalized)) {
+    throw new Error(`${label} must be one of: ${allowed.join(', ')}`);
+  }
+  return normalized;
+}
+
 function ensureName(value, label) {
   const trimmed = ensureString(value, label);
   if (!NAME_RE.test(trimmed)) {
@@ -143,6 +165,100 @@ export function buildDefaultsPrefix(defaults) {
     JSON.stringify(defaults),
     'utf8'
   ).toString('base64')}`;
+}
+
+export function decideSubagentStrategy({
+  task,
+  proposedAction,
+  estimatedSteps,
+  estimatedMinutes,
+  independentWorkUnits = 1,
+  maxParallel = 5
+}) {
+  const taskSummary = ensureString(task, 'task');
+  const action = proposedAction === undefined ? undefined : ensureOneOf(proposedAction, 'proposedAction', ['stay-local', 'delegate']);
+  const steps = estimatedSteps === undefined ? undefined : ensureInteger(estimatedSteps, 'estimatedSteps', { min: 1 });
+  const minutes = estimatedMinutes === undefined ? undefined : ensureNumber(estimatedMinutes, 'estimatedMinutes', { min: 0 });
+  const workUnits = ensureInteger(independentWorkUnits, 'independentWorkUnits', { min: 1 });
+  const parallelLimit = ensureInteger(maxParallel, 'maxParallel', { min: 1, max: 5 });
+
+  const checks = [];
+  const warnings = [];
+  const exceedsStepLimit = steps !== undefined && steps > 5;
+  const exceedsMinuteLimit = minutes !== undefined && minutes > 2;
+  const canSplitSafely = workUnits > 1;
+
+  if (steps === undefined) {
+    warnings.push('estimatedSteps is missing; decision confidence is reduced.');
+    checks.push({ status: 'warn', message: 'Estimated step count was not provided.' });
+  } else {
+    checks.push({
+      status: exceedsStepLimit ? 'warn' : 'pass',
+      message: exceedsStepLimit
+        ? `Estimated ${steps} steps exceeds the stay-local guideline of 5.`
+        : `Estimated ${steps} steps fits within the stay-local guideline.`
+    });
+  }
+
+  if (minutes === undefined) {
+    warnings.push('estimatedMinutes is missing; decision confidence is reduced.');
+    checks.push({ status: 'warn', message: 'Estimated duration was not provided.' });
+  } else {
+    checks.push({
+      status: exceedsMinuteLimit ? 'warn' : 'pass',
+      message: exceedsMinuteLimit
+        ? `Estimated ${minutes} minutes exceeds the stay-local guideline of 2.`
+        : `Estimated ${minutes} minutes fits within the stay-local guideline.`
+    });
+  }
+
+  checks.push({
+    status: canSplitSafely ? 'pass' : 'info',
+    message: canSplitSafely
+      ? `Work is parallelizable across ${workUnits} independent stream(s).`
+      : 'Work is a single dependent stream.'
+  });
+
+  const recommendedAction = exceedsStepLimit || exceedsMinuteLimit || canSplitSafely ? 'delegate' : 'stay-local';
+  const recommendedWorkers = recommendedAction === 'delegate' ? Math.min(workUnits, parallelLimit) : 0;
+  if (recommendedAction === 'delegate' && workUnits > parallelLimit) {
+    warnings.push(`Requested ${workUnits} independent work units but maxParallel limits dispatch to ${parallelLimit}.`);
+  }
+
+  let confidence = 'high';
+  if (steps === undefined && minutes === undefined) {
+    confidence = 'low';
+  } else if (steps === undefined || minutes === undefined) {
+    confidence = 'medium';
+  }
+
+  const approved = action === undefined ? true : action === recommendedAction;
+  checks.push({
+    status: approved ? 'pass' : 'fail',
+    message:
+      action === undefined
+        ? `Recommended action is "${recommendedAction}".`
+        : approved
+          ? `Proposed action "${action}" matches the recommendation.`
+          : `Proposed action "${action}" should change to "${recommendedAction}".`
+  });
+
+  const reason =
+    recommendedAction === 'delegate'
+      ? `Delegate this task because it exceeds the local-work guideline${canSplitSafely ? ' and has parallelizable work' : ''}.`
+      : 'Keep this task local because it is short, bounded, and single-stream.';
+
+  return {
+    task: taskSummary,
+    proposedAction: action,
+    approved,
+    recommendedAction,
+    recommendedWorkers,
+    confidence,
+    reason,
+    warnings,
+    checks
+  };
 }
 
 export function extractSubAgentDefaults(prompt, fallbackNamespace = 'default') {
