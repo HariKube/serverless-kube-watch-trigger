@@ -31,7 +31,10 @@ import (
 	"text/template"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+
 	"github.com/facette/natsort"
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -173,6 +176,9 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
+		if err := r.deliverOwnerLeaseTimeoutCallback(ctx, logger, req.String(), &trigger); err != nil {
+			logger.Error(err, "Trigger deletion timeout callback failed")
+		}
 
 		r.stopRunningTrigger(req.String())
 		r.remove(req.String())
@@ -279,6 +285,175 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	taskSucceeded = true
 
 	return ctrl.Result{}, nil
+}
+
+func (r *HTTPTriggerReconciler) deliverOwnerLeaseTimeoutCallback(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
+	leaseName, ok, err := r.expiredOwnerLeaseName(ctx, trigger, time.Now().UTC())
+	if err != nil || !ok {
+		return err
+	}
+
+	timeoutMessage := fmt.Sprintf("owner lease %s timed out", leaseName)
+	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(trigger.DeepCopy())
+	if err != nil {
+		return err
+	}
+	payload["message"] = timeoutMessage
+	payload["eventType"] = string(triggersv1.EventTypeDeleted)
+	payload["timedOutLease"] = map[string]interface{}{"name": leaseName}
+
+	compiledTemplates := map[string]*template.Template{}
+	if err := compileSharedTemplates(compiledTemplates, "", trigger.Spec.URL, trigger.Spec.Headers); err != nil {
+		return err
+	}
+	if trigger.Spec.Body.Template != "" {
+		if err := addCompiledTemplate(compiledTemplates, "body_template", trigger.Spec.Body.Template, template.FuncMap{"toJson": toJson}); err != nil {
+			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
+		}
+	}
+
+	depFetchCtx, depFetchCancel := context.WithTimeout(ctx, time.Minute)
+	defer depFetchCancel()
+
+	serviceScheme, servicePort, err := resolveServiceEndpoint(depFetchCtx, r, trigger.Spec.URL.Service)
+	if err != nil {
+		return err
+	}
+
+	var userAuthPassword string
+	if trigger.Spec.Auth.BasicAuth != nil {
+		userAuthPassword, err = loadSecretString(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.BasicAuth.PasswordRef)
+		if err != nil {
+			return err
+		}
+	}
+
+	headerSecrets, err := loadHeaderSecrets(depFetchCtx, r, trigger.Namespace, trigger.Spec.Headers.FromSecretRef)
+	if err != nil {
+		return err
+	}
+
+	var signature []byte
+	if trigger.Spec.Body.Signature.KeySecretRef.Name != "" {
+		signature, err = loadSecretBytes(depFetchCtx, r, trigger.Namespace, trigger.Spec.Body.Signature.KeySecretRef)
+		if err != nil {
+			return err
+		}
+	}
+
+	httpClient, err := newTriggerHTTPClient(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.TLS, trigger.Spec.Delivery.Timeout.Duration, normalizeConcurrency(trigger.Spec.Concurrency))
+	if err != nil {
+		return err
+	}
+
+	url, err := buildTriggerURL(trigger.Spec.URL, compiledTemplates, payload, serviceScheme, servicePort)
+	if err != nil {
+		return err
+	}
+
+	body := toJson(map[string]string{"message": timeoutMessage})
+	if trigger.Spec.Body.Template != "" {
+		body, err = renderTemplateToString(compiledTemplates, "body_template", payload)
+		if err != nil {
+			return err
+		}
+	}
+
+	contentType := trigger.Spec.Body.ContentType
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	headers, err := buildTriggerHeaders(contentType, trigger.Spec.Headers, headerSecrets, compiledTemplates, payload)
+	if err != nil {
+		return err
+	}
+	if trigger.Spec.Body.Signature.HMAC != nil {
+		var hashFunc func() hash.Hash
+		switch trigger.Spec.Body.Signature.HMAC.HashType {
+		case triggersv1.SignatureHashTypeSHA256:
+			hashFunc = sha256.New
+		case triggersv1.SignatureHashTypeSHA512:
+			hashFunc = sha512.New
+		}
+
+		hasher := hmac.New(hashFunc, signature)
+		_, _ = hasher.Write([]byte(body))
+		headers[trigger.Spec.Body.Signature.Header] = hex.EncodeToString(hasher.Sum(nil))
+	}
+
+	metadata, _ := payload["metadata"].(map[string]interface{})
+	if metadata == nil {
+		metadata = map[string]interface{}{
+			"name":            trigger.Name,
+			"namespace":       trigger.Namespace,
+			"resourceVersion": trigger.ResourceVersion,
+		}
+	}
+
+	_, err = deliverPayload(
+		ctx,
+		logger,
+		httpClient,
+		triggerRefName,
+		methodOrDefault(trigger.Spec.Method),
+		url,
+		body,
+		headers,
+		trigger.Spec.Auth.BasicAuth,
+		userAuthPassword,
+		trigger.Spec.Delivery.Retries,
+		trigger.Spec.Delivery.Timeout.Duration,
+		retryBackoff{min: defaultRetryBackoffMin, max: defaultRetryBackoffMax},
+		string(triggersv1.EventTypeDeleted),
+		metadata,
+	)
+	return err
+}
+
+func (r *HTTPTriggerReconciler) expiredOwnerLeaseName(ctx context.Context, trigger *triggersv1.HTTPTrigger, now time.Time) (string, bool, error) {
+	if trigger == nil {
+		return "", false, nil
+	}
+
+	for _, owner := range trigger.GetOwnerReferences() {
+		if owner.APIVersion != coordinationv1.SchemeGroupVersion.String() || owner.Kind != "Lease" || owner.Name == "" {
+			continue
+		}
+
+		ownerLease := &coordinationv1.Lease{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: owner.Name}, ownerLease); err != nil {
+			if apierrors.IsNotFound(err) {
+				return owner.Name, true, nil
+			}
+			return "", false, err
+		}
+		if leaseTimedOut(ownerLease, now) {
+			return owner.Name, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
+func leaseTimedOut(ownerLease *coordinationv1.Lease, now time.Time) bool {
+	if ownerLease == nil || ownerLease.Spec.LeaseDurationSeconds == nil || *ownerLease.Spec.LeaseDurationSeconds <= 0 {
+		return false
+	}
+
+	var renewedAt time.Time
+	switch {
+	case ownerLease.Spec.RenewTime != nil && !ownerLease.Spec.RenewTime.Time.IsZero():
+		renewedAt = ownerLease.Spec.RenewTime.Time
+	case ownerLease.Spec.AcquireTime != nil && !ownerLease.Spec.AcquireTime.Time.IsZero():
+		renewedAt = ownerLease.Spec.AcquireTime.Time
+	case !ownerLease.CreationTimestamp.IsZero():
+		renewedAt = ownerLease.CreationTimestamp.Time
+	default:
+		return false
+	}
+
+	expiresAt := renewedAt.Add(time.Duration(*ownerLease.Spec.LeaseDurationSeconds) * time.Second)
+	return !expiresAt.After(now)
 }
 
 //nolint:gocyclo

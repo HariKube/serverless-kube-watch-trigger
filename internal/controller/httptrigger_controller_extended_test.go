@@ -29,6 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -283,6 +285,107 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 
 				return len(r.runningTriggers)
 			}, 10*time.Second, 100*time.Millisecond).Should(BeZero())
+		})
+	})
+
+	Context("Reconcile - deleted trigger owner lease timeout callback", func() {
+		const (
+			name      = "trigger-owner-lease-timeout"
+			leaseName = "trigger-owner-lease-timeout-lease"
+		)
+
+		AfterEach(func() {
+			trigger := &triggersv1.HTTPTrigger{}
+			if err := k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, trigger); err == nil {
+				trigger.Finalizers = nil
+				Expect(k8sClient.Update(bgCtx, trigger)).To(Succeed())
+				Eventually(func() bool {
+					err := k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, &triggersv1.HTTPTrigger{})
+					return errors.IsNotFound(err)
+				}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+			}
+
+			lease := &coordinationv1.Lease{}
+			if err := k8sClient.Get(bgCtx, types.NamespacedName{Name: leaseName, Namespace: ns}, lease); err == nil {
+				Expect(k8sClient.Delete(bgCtx, lease)).To(Succeed())
+			}
+		})
+
+		It("calls the endpoint with a timeout message when a deleting trigger is owned by an expired lease", func() {
+			requestBody := make(chan string, 1)
+			var receivedBody string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				select {
+				case requestBody <- string(body):
+				default:
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			renewTime := metav1.NewMicroTime(time.Now().Add(-2 * time.Minute))
+			ownerLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: ns},
+				Spec: coordinationv1.LeaseSpec{
+					LeaseDurationSeconds: ptr.To(int32(30)),
+					RenewTime:            &renewTime,
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, ownerLease)).To(Succeed())
+
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       name,
+					Namespace:  ns,
+					Finalizers: []string{"tests.harikube.io/cleanup"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: coordinationv1.SchemeGroupVersion.String(),
+						Kind:       "Lease",
+						Name:       ownerLease.Name,
+						UID:        ownerLease.UID,
+					}},
+				},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+					},
+					HTTP: triggersv1.HTTP{
+						URL:    triggersv1.URL{Static: ptr.To(srv.URL + "/hook")},
+						Method: "POST",
+						Delivery: triggersv1.Delivery{
+							Timeout: metav1.Duration{Duration: 5 * time.Second},
+							Retries: 1,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+
+			Expect(k8sClient.Delete(bgCtx, trigger)).To(Succeed())
+
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+			Eventually(func() bool {
+				latest := &triggersv1.HTTPTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn, latest); err != nil {
+					return false
+				}
+				return latest.DeletionTimestamp != nil && !latest.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			r := newReconciler()
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() string {
+				select {
+				case receivedBody = <-requestBody:
+				default:
+				}
+				return receivedBody
+			}, 10*time.Second, 200*time.Millisecond).Should(ContainSubstring("timed out"))
+			Expect(receivedBody).To(ContainSubstring(leaseName))
 		})
 	})
 

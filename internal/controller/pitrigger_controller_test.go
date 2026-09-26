@@ -2,11 +2,16 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
@@ -127,7 +132,7 @@ var _ = Describe("PiTrigger Controller", func() {
 						Namespaces: []string{ns},
 					},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: "missing-pi-agent-config"},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: "missing-prompts"},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: "missing-skills"},
@@ -181,7 +186,7 @@ var _ = Describe("PiTrigger Controller", func() {
 						LockDuration: metav1.Duration{Duration: triggerLockDuration},
 					},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -216,7 +221,7 @@ var _ = Describe("PiTrigger Controller", func() {
 						LockDuration: metav1.Duration{Duration: 30 * time.Second},
 					},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -383,7 +388,7 @@ var _ = Describe("PiTrigger Controller", func() {
 						Concurrency:   1,
 					},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: lateSecretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: latePromptsName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: lateSkillsName},
@@ -429,7 +434,7 @@ var _ = Describe("PiTrigger Controller", func() {
 						Concurrency:   1,
 					},
 					Agent: triggersv1.PiAgentSpec{
-						Image:                   "ghcr.io/example/pi-runner:latest",
+						Image:                   "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:         corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef:     corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:      corev1.LocalObjectReference{Name: skillsCMName},
@@ -489,9 +494,18 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
 
 			container := job.Spec.Template.Spec.Containers[0]
-			Expect(container.Image).To(Equal("ghcr.io/example/pi-runner:latest"))
+			Expect(container.Image).To(Equal("docker.io/mhmxs/pi-agent-empty:latest"))
 			Expect(container.Command).To(BeEmpty())
-			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(buildPiTriggerWorkerPrompt(piTriggerEventFilePath, piTriggerMetadataFilePath), trigger.Spec.Agent)))
+			expectedPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
+			expectedSpecJSON, err := json.Marshal(trigger.Spec)
+			Expect(err).NotTo(HaveOccurred())
+			expectedSkill := fmt.Sprintf("sub-agent defaults base64://%s", base64.StdEncoding.EncodeToString(expectedSpecJSON))
+			promptArg := container.Args[len(container.Args)-1]
+			promptParts := strings.SplitN(promptArg, "Prompt: ", 2)
+			Expect(promptParts).To(HaveLen(2))
+			Expect(promptParts[1]).To(HavePrefix(expectedSkill))
 			Expect(container.WorkingDir).To(Equal("/workspace"))
 			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "HOME", Value: piTriggerWorkerHomeDir}))
 			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "EXTRA_FLAG", Value: "true"}))
@@ -553,7 +567,7 @@ var _ = Describe("PiTrigger Controller", func() {
 					},
 					MaxJobs: 1,
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -647,7 +661,7 @@ var _ = Describe("PiTrigger Controller", func() {
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -676,7 +690,7 @@ var _ = Describe("PiTrigger Controller", func() {
 							RestartPolicy: corev1.RestartPolicyNever,
 							Containers: []corev1.Container{{
 								Name:  "worker",
-								Image: "ghcr.io/example/pi-runner:latest",
+								Image: "docker.io/mhmxs/pi-agent-empty:latest",
 							}},
 						},
 					},
@@ -738,7 +752,7 @@ var _ = Describe("PiTrigger Controller", func() {
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -804,7 +818,7 @@ var _ = Describe("PiTrigger Controller", func() {
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}, Concurrency: 1},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -821,6 +835,125 @@ var _ = Describe("PiTrigger Controller", func() {
 				_, ok := r.runningTriggers[ns+"/"+name]
 				return ok
 			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+		})
+	})
+
+	Context("Reconcile - deleted trigger owner lease timeout job", func() {
+		const (
+			name          = "pitrigger-owner-lease-timeout"
+			secretName    = "pitrigger-owner-lease-timeout-secret"
+			promptsCMName = "pitrigger-owner-lease-timeout-prompts"
+			skillsCMName  = "pitrigger-owner-lease-timeout-skills"
+			leaseName     = "pitrigger-owner-lease-timeout-lease"
+		)
+
+		AfterEach(func() {
+			jobList := &batchv1.JobList{}
+			Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: name})).To(Succeed())
+			for i := range jobList.Items {
+				cleanupJob(bgCtx, jobList.Items[i].Name)
+				cleanupConfigMap(bgCtx, jobList.Items[i].Annotations[piTriggerInputConfigMapAnnotation])
+			}
+
+			trigger := &triggersv1.PiTrigger{}
+			if err := k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, trigger); err == nil {
+				trigger.Finalizers = nil
+				Expect(k8sClient.Update(bgCtx, trigger)).To(Succeed())
+				Eventually(func() bool {
+					err := k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, &triggersv1.PiTrigger{})
+					return apierrors.IsNotFound(err)
+				}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+			}
+
+			leaseObj := &coordinationv1.Lease{}
+			if err := k8sClient.Get(bgCtx, types.NamespacedName{Name: leaseName, Namespace: ns}, leaseObj); err == nil {
+				Expect(k8sClient.Delete(bgCtx, leaseObj)).To(Succeed())
+			}
+			cleanupConfigMap(bgCtx, promptsCMName)
+			cleanupConfigMap(bgCtx, skillsCMName)
+			cleanupSecret(bgCtx, secretName)
+		})
+
+		It("dispatches a timeout job with a timed out prompt when a deleting trigger is owned by an expired lease", func() {
+			createPiAgentConfigSecret(bgCtx, secretName)
+			createPiAgentConfigMaps(bgCtx, promptsCMName, skillsCMName)
+
+			renewTime := metav1.NewMicroTime(time.Now().Add(-2 * time.Minute))
+			ownerLease := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: ns},
+				Spec: coordinationv1.LeaseSpec{
+					LeaseDurationSeconds: ptr.To(int32(30)),
+					RenewTime:            &renewTime,
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, ownerLease)).To(Succeed())
+
+			trigger := &triggersv1.PiTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       name,
+					Namespace:  ns,
+					Finalizers: []string{"tests.harikube.io/cleanup"},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: coordinationv1.SchemeGroupVersion.String(),
+						Kind:       "Lease",
+						Name:       ownerLease.Name,
+						UID:        ownerLease.UID,
+					}},
+				},
+				Spec: triggersv1.PiTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}},
+					Agent: triggersv1.PiAgentSpec{
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
+						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
+						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
+						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
+						WorkingDir:          "/workspace",
+						NoExtensions:        true,
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			Expect(k8sClient.Delete(bgCtx, trigger)).To(Succeed())
+
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+			Eventually(func() bool {
+				latest := &triggersv1.PiTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn, latest); err != nil {
+					return false
+				}
+				return latest.DeletionTimestamp != nil && !latest.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			r := newPiReconciler()
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			jobList := &batchv1.JobList{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: name})).To(Succeed())
+				g.Expect(jobList.Items).To(HaveLen(1))
+			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
+
+			job := jobList.Items[0]
+			Expect(job.OwnerReferences).To(BeEmpty())
+			container := job.Spec.Template.Spec.Containers[0]
+			expectedPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec, fmt.Sprintf("The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
+
+			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
+			inputConfigMap := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
+			Expect(inputConfigMap.OwnerReferences).To(BeEmpty())
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "DELETED"`))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Name))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(nsn.String()))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Name))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(nsn.String()))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
 		})
 	})
 
@@ -842,7 +975,7 @@ var _ = Describe("PiTrigger Controller", func() {
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}, Concurrency: 1},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},
@@ -936,7 +1069,7 @@ var _ = Describe("PiTrigger Controller", func() {
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}, Concurrency: 1},
 					Agent: triggersv1.PiAgentSpec{
-						Image:               "ghcr.io/example/pi-runner:latest",
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
 						ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
 						PromptsConfigMapRef: corev1.LocalObjectReference{Name: promptsCMName},
 						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: skillsCMName},

@@ -1,0 +1,166 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: ephemeral-owner-lease-timeout
+spec:
+  timeouts:
+    exec: 4m
+  skipDelete: true
+  namespace: ephemeral-owner-lease-timeout
+  steps:
+  - name: Prepare namespace
+    try:
+    - script:
+        content: |
+          kubectl delete namespace ephemeral-owner-lease-timeout --ignore-not-found=true --wait=true || true
+          kubectl create namespace ephemeral-owner-lease-timeout --dry-run=client -o yaml | kubectl apply -f -
+  - name: Create lease-backed PiTrigger
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          IMAGE="docker.io/mhmxs/pi-agent-empty:latest"
+          NS="ephemeral-owner-lease-timeout"
+          LEASE_NAME="ephemeral-trigger-lease"
+          TRIGGER_NAME="ephemeral-pi-trigger"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: coordination.k8s.io/v1
+          kind: Lease
+          metadata:
+            name: ${LEASE_NAME}
+            namespace: ${NS}
+          spec:
+            leaseDurationSeconds: 30
+            renewTime: "2000-01-01T00:00:00.000000Z"
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: pi-agent-config
+            namespace: ${NS}
+          stringData:
+            settings.json: '{"provider":"test"}'
+            models.json: '[]'
+            models-store.json: '{}'
+            auth.json: '{}'
+          ---
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: pi-agent-prompts
+            namespace: ${NS}
+          data:
+            review.md: |
+              Review prompt.
+          ---
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: pi-agent-skills
+            namespace: ${NS}
+          data:
+            SKILL.md: |
+              # skill
+          EOF
+
+          LEASE_UID="$(kubectl get lease ${LEASE_NAME} -n ${NS} -o jsonpath='{.metadata.uid}')"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: triggers.harikube.info/v1
+          kind: PiTrigger
+          metadata:
+            name: ${TRIGGER_NAME}
+            namespace: ${NS}
+            finalizers:
+            - tests.harikube.io/cleanup
+            ownerReferences:
+            - apiVersion: coordination.k8s.io/v1
+              kind: Lease
+              name: ${LEASE_NAME}
+              uid: ${LEASE_UID}
+          spec:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+            - ${NS}
+            agent:
+              image: ${IMAGE}
+              configSecretRef:
+                name: pi-agent-config
+              promptsConfigMapRef:
+                name: pi-agent-prompts
+              skillsConfigMapRef:
+                name: pi-agent-skills
+              workingDir: /
+              noExtensions: true
+              backoffLimit: 0
+              ttlSecondsAfterFinished: 60
+          EOF
+    - assert:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: PiTrigger
+          metadata:
+            name: ephemeral-pi-trigger
+            namespace: ephemeral-owner-lease-timeout
+  - name: Delete owner lease and validate timeout metadata
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          NS="ephemeral-owner-lease-timeout"
+          LEASE_NAME="ephemeral-trigger-lease"
+          TRIGGER_NAME="ephemeral-pi-trigger"
+
+          kubectl delete lease ${LEASE_NAME} -n ${NS} --wait=true
+
+          for _ in $(seq 1 90); do
+            DELETION_TS="$(kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+            JOB_NAME="$(kubectl get jobs -n ${NS} -l triggers.harikube.info/pitrigger-name=${TRIGGER_NAME} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -z "${DELETION_TS}" ] || [ -z "${JOB_NAME}" ]; then
+              sleep 2
+              continue
+            fi
+
+            INPUT_CONFIGMAP="$(kubectl get job ${JOB_NAME} -n ${NS} -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/input-configmap}' 2>/dev/null || true)"
+            RESOURCE_VERSION="$(kubectl get job ${JOB_NAME} -n ${NS} -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/resource-version}' 2>/dev/null || true)"
+            EVENT_JSON="$(kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o go-template='{{index .data "event.json"}}' 2>/dev/null || true)"
+            METADATA_JSON="$(kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o go-template='{{index .data "metadata.json"}}' 2>/dev/null || true)"
+
+            if printf '%s' "${EVENT_JSON}" | grep -q '"eventType": "DELETED"' \
+              && printf '%s' "${EVENT_JSON}" | grep -q "owner lease ${LEASE_NAME} timed out" \
+              && printf '%s' "${EVENT_JSON}" | grep -q "trigger=${NS}/${TRIGGER_NAME}" \
+              && printf '%s' "${EVENT_JSON}" | grep -q "job=${JOB_NAME}" \
+              && printf '%s' "${EVENT_JSON}" | grep -q "inputConfigMap=${INPUT_CONFIGMAP}" \
+              && printf '%s' "${EVENT_JSON}" | grep -q "resourceVersion=${RESOURCE_VERSION}" \
+              && printf '%s' "${METADATA_JSON}" | grep -q "owner lease ${LEASE_NAME} timed out" \
+              && printf '%s' "${METADATA_JSON}" | grep -q "trigger=${NS}/${TRIGGER_NAME}" \
+              && printf '%s' "${METADATA_JSON}" | grep -q "job=${JOB_NAME}" \
+              && printf '%s' "${METADATA_JSON}" | grep -q "inputConfigMap=${INPUT_CONFIGMAP}" \
+              && printf '%s' "${METADATA_JSON}" | grep -q "resourceVersion=${RESOURCE_VERSION}"; then
+              kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o yaml
+              kubectl get job ${JOB_NAME} -n ${NS} -o yaml
+              kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o yaml
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "expected owner lease deletion to mark the PiTrigger for deletion and dispatch a timeout job with identifying metadata"
+          kubectl get lease ${LEASE_NAME} -n ${NS} -o yaml || true
+          kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o yaml || true
+          kubectl get jobs -n ${NS} -o yaml || true
+          kubectl get configmaps -n ${NS} -o yaml || true
+          exit 1
+  - name: Cleanup test
+    try:
+    - script:
+        content: |
+          set -euo pipefail
+          NS="ephemeral-owner-lease-timeout"
+          TRIGGER_NAME="ephemeral-pi-trigger"
+          kubectl patch pitrigger ${TRIGGER_NAME} -n ${NS} --type=merge -p '{"metadata":{"finalizers":[]}}' || true
+          kubectl delete namespace ${NS} --ignore-not-found=true --wait=true || true

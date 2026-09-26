@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,8 @@ import (
 	"sync/atomic"
 	"text/template"
 	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
 
 	"github.com/facette/natsort"
 	batchv1 "k8s.io/api/batch/v1"
@@ -74,20 +77,24 @@ const (
 )
 
 type piTriggerEventInput struct {
-	TriggerRefName   string                 `json:"triggerRefName"`
-	TriggerName      string                 `json:"triggerName"`
-	TriggerNamespace string                 `json:"triggerNamespace"`
-	EventType        string                 `json:"eventType"`
-	ResourceVersion  string                 `json:"resourceVersion"`
-	Object           map[string]interface{} `json:"object"`
+	TriggerRefName    string                 `json:"triggerRefName"`
+	TriggerName       string                 `json:"triggerName"`
+	TriggerNamespace  string                 `json:"triggerNamespace"`
+	EventType         string                 `json:"eventType"`
+	ResourceVersion   string                 `json:"resourceVersion"`
+	Message           string                 `json:"message,omitempty"`
+	TimedOutLeaseName string                 `json:"timedOutLeaseName,omitempty"`
+	Object            map[string]interface{} `json:"object"`
 }
 
 type piTriggerJobMetadata struct {
-	TriggerRefName   string `json:"triggerRefName"`
-	TriggerName      string `json:"triggerName"`
-	TriggerNamespace string `json:"triggerNamespace"`
-	EventType        string `json:"eventType"`
-	ResourceVersion  string `json:"resourceVersion"`
+	TriggerRefName    string `json:"triggerRefName"`
+	TriggerName       string `json:"triggerName"`
+	TriggerNamespace  string `json:"triggerNamespace"`
+	EventType         string `json:"eventType"`
+	ResourceVersion   string `json:"resourceVersion"`
+	Message           string `json:"message,omitempty"`
+	TimedOutLeaseName string `json:"timedOutLeaseName,omitempty"`
 }
 
 // PiTriggerReconciler reconciles a PiTrigger object.
@@ -146,6 +153,7 @@ func (r *PiTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) {
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;list;watch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 
@@ -175,6 +183,9 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
+		if err := r.dispatchOwnerLeaseTimeoutJob(ctx, triggerRefName, &trigger); err != nil {
+			logger.Error(err, "Trigger deletion timeout job dispatch failed")
+		}
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
 		sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
@@ -561,9 +572,6 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 	if rv == "" {
 		return "", "", errors.New("watched object has no resourceVersion")
 	}
-	nameHash := shortHash(strings.Join([]string{triggerRefName, string(event.Type), obj.GetNamespace(), obj.GetName(), rv}, "|"))
-	jobName := buildPiTriggerResourceName(trigger.Name, nameHash, "job")
-	configMapName := buildPiTriggerResourceName(trigger.Name, nameHash, "input")
 
 	eventPayload := piTriggerEventInput{
 		TriggerRefName:   triggerRefName,
@@ -580,6 +588,86 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 		EventType:        string(event.Type),
 		ResourceVersion:  rv,
 	}
+
+	workerPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec)
+	if err != nil {
+		return "", "", err
+	}
+
+	return r.createPiWorkerJob(ctx, triggerRefName, trigger, eventPayload, metadataPayload, workerPrompt)
+}
+
+func (r *PiTriggerReconciler) dispatchOwnerLeaseTimeoutJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger) error {
+	leaseName, ok, err := r.expiredOwnerLeaseName(ctx, trigger, time.Now().UTC())
+	if err != nil || !ok {
+		return err
+	}
+
+	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(trigger.DeepCopy())
+	if err != nil {
+		return err
+	}
+
+	timeoutMessage := fmt.Sprintf("owner lease %s timed out", leaseName)
+	rv := trigger.GetResourceVersion()
+	if rv == "" {
+		rv = "0"
+	}
+	eventPayload := piTriggerEventInput{
+		TriggerRefName:    triggerRefName,
+		TriggerName:       trigger.Name,
+		TriggerNamespace:  trigger.Namespace,
+		EventType:         string(triggersv1.EventTypeDeleted),
+		ResourceVersion:   rv,
+		Message:           timeoutMessage,
+		TimedOutLeaseName: leaseName,
+		Object:            payload,
+	}
+	metadataPayload := piTriggerJobMetadata{
+		TriggerRefName:    triggerRefName,
+		TriggerName:       trigger.Name,
+		TriggerNamespace:  trigger.Namespace,
+		EventType:         string(triggersv1.EventTypeDeleted),
+		ResourceVersion:   rv,
+		Message:           timeoutMessage,
+		TimedOutLeaseName: leaseName,
+	}
+	prompt, err := buildPiTriggerWorkerPrompt(
+		trigger.Spec,
+		fmt.Sprintf("The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName),
+	)
+	if err != nil {
+		return err
+	}
+	_, _, err = r.createPiWorkerJob(ctx, triggerRefName, trigger, eventPayload, metadataPayload, prompt)
+	return err
+}
+
+func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger, eventPayload piTriggerEventInput, metadataPayload piTriggerJobMetadata, workerPrompt string) (string, string, error) {
+	rv := eventPayload.ResourceVersion
+	if rv == "" {
+		return "", "", errors.New("watched object has no resourceVersion")
+	}
+	objectName := ""
+	objectNamespace := trigger.Namespace
+	if metadata, ok := eventPayload.Object["metadata"].(map[string]interface{}); ok {
+		if name, ok := metadata["name"].(string); ok {
+			objectName = name
+		}
+		if namespace, ok := metadata["namespace"].(string); ok && namespace != "" {
+			objectNamespace = namespace
+		}
+	}
+	nameHash := shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, rv}, "|"))
+	jobName := buildPiTriggerResourceName(trigger.Name, nameHash, "job")
+	configMapName := buildPiTriggerResourceName(trigger.Name, nameHash, "input")
+	if eventPayload.Message != "" {
+		eventPayload.Message = buildPiTriggerTimeoutMessage(eventPayload.Message, triggerRefName, rv, jobName, configMapName)
+	}
+	if metadataPayload.Message != "" {
+		metadataPayload.Message = buildPiTriggerTimeoutMessage(metadataPayload.Message, triggerRefName, rv, jobName, configMapName)
+	}
+
 	eventBytes, err := json.MarshalIndent(eventPayload, "", "  ")
 	if err != nil {
 		return "", "", err
@@ -588,8 +676,6 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 	if err != nil {
 		return "", "", err
 	}
-
-	workerPrompt := buildPiTriggerWorkerPrompt(piTriggerEventFilePath, piTriggerMetadataFilePath)
 
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -605,8 +691,11 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 			"metadata.json": string(metadataBytes),
 		},
 	}
-	if err := controllerutil.SetControllerReference(trigger, configMap, r.Scheme); err != nil {
-		return "", "", err
+	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
+	if !persistAfterTriggerDeletion {
+		if err := controllerutil.SetControllerReference(trigger, configMap, r.Scheme); err != nil {
+			return "", "", err
+		}
 	}
 	if err := r.Create(ctx, configMap); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", "", err
@@ -625,7 +714,7 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 			},
 			Annotations: map[string]string{
 				piTriggerInputConfigMapAnnotation:  configMapName,
-				piTriggerEventTypeAnnotation:       string(event.Type),
+				piTriggerEventTypeAnnotation:       eventPayload.EventType,
 				piTriggerResourceVersionAnnotation: rv,
 			},
 		},
@@ -698,8 +787,10 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 			},
 		},
 	}
-	if err := controllerutil.SetControllerReference(trigger, job, r.Scheme); err != nil {
-		return "", "", err
+	if !persistAfterTriggerDeletion {
+		if err := controllerutil.SetControllerReference(trigger, job, r.Scheme); err != nil {
+			return "", "", err
+		}
 	}
 	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", "", err
@@ -708,14 +799,71 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 	return jobName, rv, nil
 }
 
-func buildPiTriggerWorkerPrompt(eventFilePath, metadataFilePath string) string {
-	sections := []string{
-		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the provided event payload.",
-		fmt.Sprintf("The triggering Kubernetes event payload is available in the container at %s.", eventFilePath),
-		fmt.Sprintf("Trigger metadata is available in the container at %s.", metadataFilePath),
-		"Use pi tools to inspect these files as needed before acting.",
+func (r *PiTriggerReconciler) expiredOwnerLeaseName(ctx context.Context, trigger *triggersv1.PiTrigger, now time.Time) (string, bool, error) {
+	if trigger == nil {
+		return "", false, nil
 	}
-	return strings.Join(sections, "\n\n")
+
+	for _, owner := range trigger.GetOwnerReferences() {
+		if owner.APIVersion != coordinationv1.SchemeGroupVersion.String() || owner.Kind != "Lease" || owner.Name == "" {
+			continue
+		}
+
+		ownerLease := &coordinationv1.Lease{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: owner.Name}, ownerLease); err != nil {
+			if apierrors.IsNotFound(err) {
+				return owner.Name, true, nil
+			}
+			return "", false, err
+		}
+		if leaseTimedOut(ownerLease, now) {
+			return owner.Name, true, nil
+		}
+	}
+
+	return "", false, nil
+}
+
+func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, jobName, inputConfigMapName string) string {
+	parts := []string{baseMessage}
+	if triggerRefName != "" {
+		parts = append(parts, fmt.Sprintf("trigger=%s", triggerRefName))
+	}
+	if resourceVersion != "" {
+		parts = append(parts, fmt.Sprintf("resourceVersion=%s", resourceVersion))
+	}
+	if jobName != "" {
+		parts = append(parts, fmt.Sprintf("job=%s", jobName))
+	}
+	if inputConfigMapName != "" {
+		parts = append(parts, fmt.Sprintf("inputConfigMap=%s", inputConfigMapName))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func buildPiTriggerWorkerPrompt(triggerSpec triggersv1.PiTriggerSpec, extraSections ...string) (string, error) {
+	triggerSpecSkill, err := buildPiTriggerSpecSkill(triggerSpec)
+	if err != nil {
+		return "", err
+	}
+
+	sections := []string{
+		triggerSpecSkill,
+		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the provided event payload.",
+		fmt.Sprintf("The triggering Kubernetes event payload is available in the container at %s.", piTriggerEventFilePath),
+		fmt.Sprintf("Trigger metadata is available in the container at %s.", piTriggerMetadataFilePath),
+	}
+	sections = append(sections, extraSections...)
+	sections = append(sections, "Use pi tools to inspect these files as needed before acting.")
+	return strings.Join(sections, "\n\n"), nil
+}
+
+func buildPiTriggerSpecSkill(triggerSpec triggersv1.PiTriggerSpec) (string, error) {
+	payload, err := json.Marshal(triggerSpec)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sub-agent defaults base64://%s", base64.StdEncoding.EncodeToString(payload)), nil
 }
 
 func buildPiTriggerWorkerArgs(prompt string, agent triggersv1.PiAgentSpec) []string {
