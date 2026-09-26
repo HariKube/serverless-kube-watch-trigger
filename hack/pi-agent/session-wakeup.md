@@ -29,9 +29,11 @@ Run this skill on every prompt that might be a sub-agent report.
    - `wait` or `merge`: replace the Secret with `replacementSecretJson` using `exec_kubectl`
 5. If the action is `secret-not-found` or `wait`, call `exit_pi` with the returned `exitReason`.
 6. If the action is `merge`, continue the parent task using the returned context and stored `result-r*-w*.json` entries.
+7. After a `merge`, ask `decision_maker` what execution mode should come next for the resumed parent work before choosing local continuation, another worker split, or a new hibernation round.
 
 ## Rules
 
 - Never decrement the pending counter outside the extension result.
 - Never guess missing wake-up fields.
+- Keep the Secret/Job/Event fetch and `process_session_wakeup` handling deterministic; use `decision_maker` only after a successful `merge` transitions control back to the parent task.
 - Handle `failed`, `timeout`, and `secret-not-found` outcomes explicitly.

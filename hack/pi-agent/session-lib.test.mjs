@@ -101,6 +101,10 @@ test('prepareSessionHibernation builds context and manifests for pending workers
   assert.deepEqual(prepared.context.sourceOwnerReference, sourceOwnerReference);
   assert.match(prepared.workers[1].prompt, /Worker Index: 2/);
   assert.match(prepared.triggerManifests[0].metadata.annotations['harikube.info/worker-prompt'], /Task:/);
+  assert.equal(
+    prepared.triggerManifests[0].spec.eventFilter,
+    'and (not .spec.holderIdentity) (not .spec.acquireTime) (not .spec.renewTime) (not .spec.leaseTransitions)'
+  );
   assert.deepEqual(prepared.secretManifest.metadata.ownerReferences, [sourceOwnerReference]);
   assert.deepEqual(prepared.leaseManifests[0].metadata.ownerReferences, [sourceOwnerReference]);
   assert.deepEqual(prepared.triggerManifests[0].metadata.ownerReferences, [sourceOwnerReference]);

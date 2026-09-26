@@ -465,6 +465,7 @@ export function prepareSessionHibernation({
       },
       namespaces: [defaults.namespace],
       fieldSelectors: [`metadata.name=${worker.leaseName}`],
+      eventFilter: 'and (not .spec.holderIdentity) (not .spec.acquireTime) (not .spec.renewTime) (not .spec.leaseTransitions)',
       eventTypes: ['ADDED'],
       sendInitialEvents: true,
       maxJobs: 1,
