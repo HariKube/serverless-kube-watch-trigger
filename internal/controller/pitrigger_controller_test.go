@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -31,6 +33,13 @@ import (
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
 )
+
+func TestBuildPiTriggerWorkerArgsDoesNotDisableSessions(t *testing.T) {
+	args := buildPiTriggerWorkerArgs("do the thing", triggersv1.PiAgentSpec{})
+	if slices.Contains(args, "--no-session") {
+		t.Fatalf("expected PiTrigger worker args to preserve sessions, got %v", args)
+	}
+}
 
 func newPiReconciler() *PiTriggerReconciler {
 	r := &PiTriggerReconciler{

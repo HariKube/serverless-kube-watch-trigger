@@ -115,7 +115,7 @@ spec:
 
             if [ -n "$JOB_NAME" ] \
               && [ -n "$POD_NAME" ] \
-              && printf '%s' "$JOB_ARGS" | grep -q -- '--no-session' \
+              && ! printf '%s' "$JOB_ARGS" | grep -q -- '--no-session' \
               && printf '%s' "$JOB_ARGS" | grep -q -- '--mode'; then
               kubectl get pitrigger pi-trigger-simple -n pi-trigger-simple -o yaml
               kubectl get job "$JOB_NAME" -n pi-trigger-simple -o yaml

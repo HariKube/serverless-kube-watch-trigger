@@ -70,6 +70,13 @@ test('decideSubagentStrategy rejects keeping large parallel work local', () => {
 });
 
 test('prepareSessionHibernation builds context and manifests for pending workers', () => {
+  const sourceOwnerReference = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    name: 'source-config',
+    uid: 'source-uid-1'
+  };
+
   const prepared = prepareSessionHibernation({
     subAgentDefaults: sampleDefaults(),
     originalPrompt: 'Ship it',
@@ -81,7 +88,8 @@ test('prepareSessionHibernation builds context and manifests for pending workers
       { index: 2, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/2.md' }
     ],
     sessionId: 's-demo',
-    round: 2
+    round: 2,
+    sourceOwnerReference
   });
 
   assert.equal(prepared.sessionId, 's-demo');
@@ -90,8 +98,74 @@ test('prepareSessionHibernation builds context and manifests for pending workers
   assert.equal(prepared.secretManifest.metadata.labels['harikube.info/pending-subagents'], '1');
   assert.equal(prepared.leaseManifests.length, 1);
   assert.equal(prepared.triggerManifests.length, 1);
+  assert.deepEqual(prepared.context.sourceOwnerReference, sourceOwnerReference);
   assert.match(prepared.workers[1].prompt, /Worker Index: 2/);
   assert.match(prepared.triggerManifests[0].metadata.annotations['harikube.info/worker-prompt'], /Task:/);
+  assert.deepEqual(prepared.secretManifest.metadata.ownerReferences, [sourceOwnerReference]);
+  assert.deepEqual(prepared.leaseManifests[0].metadata.ownerReferences, [sourceOwnerReference]);
+  assert.deepEqual(prepared.triggerManifests[0].metadata.ownerReferences, [sourceOwnerReference]);
+});
+
+
+test('prepareSessionHibernation updates an existing secret manifest when the session secret already exists', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [{ index: 1, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/1.md' }],
+    sessionId: 's-demo',
+    round: 3,
+    existingSecretJson: JSON.stringify({
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: 'pi-session-s-demo',
+        namespace: 'demo',
+        resourceVersion: '42',
+        labels: {
+          'custom-label': 'keep-me'
+        }
+      },
+      type: 'Opaque',
+      data: {
+        'result-r2-w1.json': Buffer.from(JSON.stringify({ kept: true }), 'utf8').toString('base64')
+      }
+    })
+  });
+
+  assert.equal(prepared.secretManifest.metadata.resourceVersion, '42');
+  assert.equal(prepared.secretManifest.metadata.labels['custom-label'], 'keep-me');
+  assert.equal(prepared.secretManifest.metadata.labels['harikube.info/round'], '3');
+  assert.equal(prepared.secretManifest.data['result-r2-w1.json'], Buffer.from(JSON.stringify({ kept: true }), 'utf8').toString('base64'));
+  const storedContext = JSON.parse(Buffer.from(prepared.secretManifest.data['context.json'], 'base64').toString('utf8'));
+  assert.equal(storedContext.id, prepared.context.id);
+  assert.equal(storedContext.round, prepared.context.round);
+  assert.equal(storedContext.status, prepared.context.status);
+  assert.equal(storedContext.workers[0].leaseName, prepared.context.workers[0].leaseName);
+});
+
+test('processSessionWakeup returns secret-not-found when the session secret is gone', () => {
+  const prompt = [
+    'Session ID: s-demo',
+    'Namespace: demo',
+    'Session Secret Label: harikube.info/session=s-demo',
+    'Round: 1',
+    'Worker Index: 1'
+  ].join('\n');
+
+  const result = processSessionWakeup({
+    prompt,
+    secretJson: JSON.stringify({
+      kind: 'Status',
+      reason: 'NotFound',
+      message: 'secrets "pi-session-s-demo" not found'
+    })
+  });
+
+  assert.equal(result.action, 'secret-not-found');
+  assert.match(result.reason, /not found/i);
+  assert.match(result.exitReason, /goodbye/i);
 });
 
 test('processSessionWakeup records a finished worker and marks merge when last worker reports', () => {

@@ -918,7 +918,6 @@ func buildPiTriggerWorkerArgs(prompt string, agent triggersv1.PiAgentSpec) []str
 		}
 		args = append(args, "--extension", extension)
 	}
-	args = append(args, "--no-session")
 	if agent.Provider != "" {
 		args = append(args, "--provider", agent.Provider)
 	}

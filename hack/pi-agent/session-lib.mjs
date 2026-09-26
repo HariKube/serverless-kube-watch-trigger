@@ -94,6 +94,19 @@ function decodeJsonBase64(value, label) {
   }
 }
 
+function normalizeOwnerReference(value, label) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const raw = ensureObject(value, label);
+  return {
+    apiVersion: ensureString(raw.apiVersion, `${label}.apiVersion`),
+    kind: ensureString(raw.kind, `${label}.kind`),
+    name: ensureName(raw.name, `${label}.name`),
+    uid: ensureString(raw.uid, `${label}.uid`)
+  };
+}
+
 function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedPrompt) {
   const raw = ensureObject(worker, 'worker');
   const index = ensureInteger(raw.index, 'worker.index', { min: 1 });
@@ -320,7 +333,9 @@ export function prepareSessionHibernation({
   sessionId,
   secretName,
   round,
-  previousContext
+  previousContext,
+  existingSecretJson,
+  sourceOwnerReference
 }) {
   const previous = previousContext ? ensureObject(previousContext, 'previousContext') : undefined;
   const defaults = normalizeSubAgentDefaults(
@@ -338,10 +353,29 @@ export function prepareSessionHibernation({
   const resolvedSessionId = ensureSessionId(sessionId ?? previous?.id ?? createSessionId(), 'sessionId');
   const resolvedRound = round ?? ((previous?.round ?? 0) + 1);
   const resolvedSecretName = trimKubeName(secretName ?? previous?.secretName ?? `pi-session-${resolvedSessionId}`);
+  const resolvedOwnerReference = normalizeOwnerReference(
+    sourceOwnerReference ?? previous?.sourceOwnerReference,
+    'sourceOwnerReference'
+  );
+  const ownerReferences = resolvedOwnerReference ? [resolvedOwnerReference] : undefined;
   const normalizedWorkers = rawWorkers.map(worker =>
     normalizeWorker(worker, defaults, resolvedSessionId, defaults.namespace, resolvedRound, normalizedPrompt)
   );
   const pendingWorkers = normalizedWorkers.filter(worker => !worker.completed);
+  const existingSecret = existingSecretJson ? resolveSecret(existingSecretJson) : undefined;
+
+  if (existingSecret) {
+    if (existingSecret.metadata?.name !== resolvedSecretName) {
+      throw new Error(
+        `existingSecretJson metadata.name must be ${resolvedSecretName}, got ${existingSecret.metadata?.name || '(missing)'}`
+      );
+    }
+    if (existingSecret.metadata?.namespace !== defaults.namespace) {
+      throw new Error(
+        `existingSecretJson metadata.namespace must be ${defaults.namespace}, got ${existingSecret.metadata?.namespace || '(missing)'}`
+      );
+    }
+  }
 
   const context = {
     operation: 'pi-session-hibernate',
@@ -355,26 +389,40 @@ export function prepareSessionHibernation({
     workSoFar,
     nextStep: next,
     workers: normalizedWorkers.map(({ prompt, ...worker }) => worker),
+    ...(resolvedOwnerReference ? { sourceOwnerReference: resolvedOwnerReference } : {}),
     status: 'hibernated'
   };
 
-  const secretManifest = {
-    apiVersion: 'v1',
-    kind: 'Secret',
-    metadata: {
-      name: resolvedSecretName,
-      namespace: defaults.namespace,
-      labels: {
-        'harikube.info/session': resolvedSessionId,
-        'harikube.info/round': String(resolvedRound),
-        'harikube.info/pending-subagents': String(pendingWorkers.length)
-      }
-    },
-    type: 'Opaque',
-    stringData: {
-      'context.json': JSON.stringify(context, null, 2)
+  const secretManifest = existingSecret
+    ? clone(existingSecret)
+    : {
+        apiVersion: 'v1',
+        kind: 'Secret',
+        metadata: {
+          name: resolvedSecretName,
+          namespace: defaults.namespace
+        },
+        type: 'Opaque'
+      };
+
+  secretManifest.metadata = {
+    ...(secretManifest.metadata || {}),
+    name: resolvedSecretName,
+    namespace: defaults.namespace,
+    ...(ownerReferences ? { ownerReferences } : {}),
+    labels: {
+      ...(secretManifest.metadata?.labels || {}),
+      'harikube.info/session': resolvedSessionId,
+      'harikube.info/round': String(resolvedRound),
+      'harikube.info/pending-subagents': String(pendingWorkers.length)
     }
   };
+  secretManifest.type = secretManifest.type || 'Opaque';
+  secretManifest.data = {
+    ...(secretManifest.data || {}),
+    'context.json': encodeJson(context)
+  };
+  delete secretManifest.stringData;
 
   const leaseManifests = pendingWorkers.map(worker => ({
     apiVersion: 'coordination.k8s.io/v1',
@@ -382,6 +430,7 @@ export function prepareSessionHibernation({
     metadata: {
       name: worker.leaseName,
       namespace: defaults.namespace,
+      ...(ownerReferences ? { ownerReferences } : {}),
       labels: {
         'harikube.info/session': resolvedSessionId,
         'harikube.info/worker': String(worker.index)
@@ -398,6 +447,7 @@ export function prepareSessionHibernation({
     metadata: {
       name: worker.triggerName,
       namespace: defaults.namespace,
+      ...(ownerReferences ? { ownerReferences } : {}),
       labels: {
         'harikube.info/session': resolvedSessionId,
         'harikube.info/worker': String(worker.index)
@@ -491,15 +541,24 @@ export function parseWakeupPrompt(prompt) {
 }
 
 function resolveSecret(secretInput) {
+  if (secretInput === undefined || secretInput === null || secretInput === '') {
+    return undefined;
+  }
   const parsed = typeof secretInput === 'string' ? JSON.parse(secretInput) : clone(secretInput);
+  if (parsed?.kind === 'Status' && parsed?.reason === 'NotFound') {
+    return undefined;
+  }
   if (parsed?.kind === 'List') {
-    if (!Array.isArray(parsed.items) || parsed.items.length !== 1) {
+    if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+      return undefined;
+    }
+    if (parsed.items.length !== 1) {
       throw new Error('expected exactly one Secret in the list response');
     }
     return parsed.items[0];
   }
   if (parsed?.kind !== 'Secret') {
-    throw new Error('expected a Secret JSON object or Secret List response');
+    throw new Error('expected a Secret JSON object, Secret List response, or NotFound Status');
   }
   return parsed;
 }
@@ -558,6 +617,14 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
   }
 
   const secret = resolveSecret(secretJson);
+  if (!secret) {
+    return {
+      action: 'secret-not-found',
+      reason: `Session Secret not found for session ${promptInfo.sessionId}.`,
+      promptInfo,
+      exitReason: `Goodbye: session ${promptInfo.sessionId} secret not found.`
+    };
+  }
   const context = readContextFromSecret(secret);
   if (context.id !== promptInfo.sessionId || context.namespace !== promptInfo.namespace) {
     return {

@@ -10,6 +10,13 @@ const Worker = Type.Object({
   result: Type.Optional(Type.String())
 });
 
+const OwnerReference = Type.Object({
+  apiVersion: Type.String({ description: 'API version of the original triggering resource.' }),
+  kind: Type.String({ description: 'Kind of the original triggering resource.' }),
+  name: Type.String({ description: 'Name of the original triggering resource.' }),
+  uid: Type.String({ description: 'UID of the original triggering resource.' })
+});
+
 export default function registerPrepareSessionHibernation(pi) {
   pi.registerTool({
     name: 'prepare_session_hibernation',
@@ -26,7 +33,11 @@ export default function registerPrepareSessionHibernation(pi) {
       sessionId: Type.Optional(Type.String()),
       secretName: Type.Optional(Type.String()),
       round: Type.Optional(Type.Number()),
-      previousContext: Type.Optional(Type.Any())
+      previousContext: Type.Optional(Type.Any()),
+      existingSecretJson: Type.Optional(
+        Type.String({ description: 'Existing Secret JSON from kubectl get secret ... -o json when updating an existing session Secret.' })
+      ),
+      sourceOwnerReference: Type.Optional(OwnerReference)
     }),
     async execute(_toolCallId, params) {
       const result = prepareSessionHibernation(params);
