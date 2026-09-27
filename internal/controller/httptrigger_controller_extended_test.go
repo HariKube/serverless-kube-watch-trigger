@@ -650,6 +650,59 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 		})
 	})
 
+	Context("Reconcile - session timeout deletion path", func() {
+		const name = "trigger-session-timeout"
+		var srv *httptest.Server
+
+		BeforeEach(func() {
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+						Timeout:    metav1.Duration{Duration: 250 * time.Millisecond},
+					},
+					HTTP: triggersv1.HTTP{
+						URL:    triggersv1.URL{Static: ptr.To(srv.URL)},
+						Method: "POST",
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			srv.Close()
+			cleanupTrigger(bgCtx, name)
+		})
+
+		It("cancels the watcher session and safely deletes a timed-out trigger", func() {
+			r := newReconciler()
+			nsn := types.NamespacedName{Name: name, Namespace: ns}
+
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() int {
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+				return len(r.runningTriggers)
+			}, 10*time.Second, 100*time.Millisecond).Should(BeZero())
+
+			Eventually(func() bool {
+				obj := &triggersv1.HTTPTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn, obj); err != nil {
+					return errors.IsNotFound(err)
+				}
+				return obj.DeletionTimestamp != nil && !obj.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
+		})
+	})
+
 	// ─────────────────────────────────────────────────────────────
 	// URL.Static strategy
 	// ─────────────────────────────────────────────────────────────

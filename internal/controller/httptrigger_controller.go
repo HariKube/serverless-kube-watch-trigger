@@ -80,12 +80,17 @@ type HTTPTriggerReconciler struct {
 
 	deliveryGateRegistry
 
-	ctx                 context.Context
-	runningTriggersLock sync.Mutex
-	runningTriggers     map[string]func()
+	ctx                    context.Context
+	runningTriggersLock    sync.Mutex
+	runningTriggers        map[string]func()
+	runningTriggerSessions map[string]*httpTriggerSession
 
 	triggerLocksLock sync.Mutex
 	triggerLocks     map[string]*sync.Mutex
+}
+
+type httpTriggerSession struct {
+	stop func()
 }
 
 // triggerLock returns the mutex that serializes reconcile work (session
@@ -121,6 +126,7 @@ func (r *HTTPTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) 
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
 		cancel()
 		delete(r.runningTriggers, triggerRefName)
+		delete(r.runningTriggerSessions, triggerRefName)
 		recordControllerSessionStop(metricControllerHTTPTrigger)
 	}
 	if r.DeletionWatcher != nil {
@@ -323,18 +329,23 @@ func (r *HTTPTriggerReconciler) acquireReconcileLease(ctx context.Context, logge
 
 func (r *HTTPTriggerReconciler) deliverOwnerLeaseTimeoutCallback(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
 	leaseName, ok, err := r.expiredOwnerLeaseName(ctx, trigger, time.Now().UTC())
-	if err != nil || !ok {
+	if err != nil {
 		return err
 	}
 
-	timeoutMessage := fmt.Sprintf("owner lease %s timed out", leaseName)
+	timeoutMessage := "trigger session timed out"
+	if ok {
+		timeoutMessage = fmt.Sprintf("owner lease %s timed out", leaseName)
+	}
 	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(trigger.DeepCopy())
 	if err != nil {
 		return err
 	}
 	payload["message"] = timeoutMessage
 	payload["eventType"] = string(triggersv1.EventTypeDeleted)
-	payload["timedOutLease"] = map[string]interface{}{"name": leaseName}
+	if ok {
+		payload["timedOutLease"] = map[string]interface{}{"name": leaseName}
+	}
 
 	compiledTemplates := map[string]*template.Template{}
 	if err := compileSharedTemplates(compiledTemplates, "", trigger.Spec.URL, trigger.Spec.Headers); err != nil {
@@ -544,15 +555,44 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	resourceClient := r.DynamicClient.Resource(gvr)
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
 
-	ctx, cancel := context.WithCancel(r.ctx)
+	sessionTimeout := trigger.Spec.Timeout.Duration
+	sessionCtx, sessionCancel := context.WithCancel(r.ctx)
+	ctx := sessionCtx
+	var timeoutCancel context.CancelFunc
+	if sessionTimeout > 0 {
+		ctx, timeoutCancel = context.WithTimeout(sessionCtx, sessionTimeout)
+	}
+
+	var stopSessionOnce sync.Once
+	stopSession := func() {
+		stopSessionOnce.Do(func() {
+			if timeoutCancel != nil {
+				timeoutCancel()
+			}
+			sessionCancel()
+		})
+	}
+
+	session := &httpTriggerSession{stop: stopSession}
 
 	r.runningTriggersLock.Lock()
-	r.runningTriggers[triggerRefName] = cancel
+	if r.runningTriggers == nil {
+		r.runningTriggers = map[string]func(){}
+	}
+	if r.runningTriggerSessions == nil {
+		r.runningTriggerSessions = map[string]*httpTriggerSession{}
+	}
+	r.runningTriggers[triggerRefName] = stopSession
+	r.runningTriggerSessions[triggerRefName] = session
 	r.runningTriggersLock.Unlock()
 	recordControllerSessionStart(metricControllerHTTPTrigger)
 	if r.DeletionWatcher != nil {
-		r.DeletionWatcher.RegisterTask(triggerRefName, cancel)
+		r.DeletionWatcher.RegisterTask(triggerRefName, stopSession)
 	}
+
+	triggerKey := client.ObjectKeyFromObject(trigger)
+	triggerUID := trigger.UID
+	triggerGeneration := trigger.Generation
 
 	listOpts := buildWatcherListOptions(resourceVersion, trigger.Spec.SendInitialEvents, trigger.Spec.LabelSelector, trigger.Spec.FieldSelector)
 
@@ -624,6 +664,39 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	}
 
 	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
+	if sessionTimeout > 0 {
+		go func(session *httpTriggerSession) {
+			<-ctx.Done()
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return
+			}
+
+			logger.Info("Trigger session timed out", "timeout", sessionTimeout.String())
+
+			deleteCtx, deleteCancel := context.WithTimeout(r.ctx, 10*time.Second)
+			defer deleteCancel()
+
+			latest := &triggersv1.HTTPTrigger{}
+			if err := r.Get(deleteCtx, triggerKey, latest); err != nil {
+				if !apierrors.IsNotFound(err) {
+					logger.Error(err, "Timed out trigger fetch failed")
+				}
+			} else if latest.UID != triggerUID || latest.Generation != triggerGeneration {
+				logger.V(1).Info("Skipping timed out trigger deletion for stale session", "uid", latest.UID, "generation", latest.Generation)
+			} else if latest.GetDeletionTimestamp() == nil || latest.GetDeletionTimestamp().IsZero() {
+				if err := r.Delete(deleteCtx, latest); err != nil && !apierrors.IsNotFound(err) {
+					logger.Error(err, "Timed out trigger deletion failed")
+				}
+			}
+
+			r.runningTriggersLock.Lock()
+			if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
+				r.stopRunningTriggerLocked(triggerRefName)
+			}
+			r.runningTriggersLock.Unlock()
+		}(session)
+	}
+
 	logger.Info("Watcher started")
 
 	const (
@@ -878,10 +951,7 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 			// operator must not leave zombie watchers behind.
 			r.runningTriggersLock.Lock()
 			for runningRef := range r.runningTriggers {
-				if cancelFn, ok := r.runningTriggers[runningRef]; ok {
-					cancelFn()
-					delete(r.runningTriggers, runningRef)
-				}
+				r.stopRunningTriggerLocked(runningRef)
 			}
 			r.runningTriggersLock.Unlock()
 
@@ -899,6 +969,7 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 	r.init()
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
+	r.runningTriggerSessions = map[string]*httpTriggerSession{}
 	r.triggerLocksLock = sync.Mutex{}
 	r.triggerLocks = map[string]*sync.Mutex{}
 	if r.DeletionWatcher == nil {
@@ -955,6 +1026,7 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 			if time.Since(drainStart) >= 30*time.Second {
 				r.runningTriggersLock.Lock()
 				r.runningTriggers = map[string]func(){}
+				r.runningTriggerSessions = map[string]*httpTriggerSession{}
 				r.runningTriggersLock.Unlock()
 
 				return

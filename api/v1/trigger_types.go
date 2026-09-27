@@ -69,6 +69,11 @@ type TriggerSpec struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Format=duration
+	// Timeout limits the trigger watcher/session lifetime, after which the controller may cancel watchers and delete the trigger.
+	Timeout metav1.Duration `json:"timeout,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Format=duration
 	// LockDuration enables annotation-based reconcile leasing for this trigger when set to a non-zero duration.
 	LockDuration metav1.Duration `json:"lockDuration,omitempty"`
 }

@@ -9,6 +9,7 @@ spec:
     kind: ConfigMap
   namespaces:
     - default
+  timeout: 30m
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:

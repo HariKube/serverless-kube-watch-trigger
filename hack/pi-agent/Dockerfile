@@ -13,10 +13,12 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
   && chmod +x kubectl \
   && mv kubectl /usr/local/bin/
 
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent @kubernetes/client-node@2.0.0
 
 COPY *.md /root/.pi/agent/skills/
 COPY *.ts *.mjs /root/.pi/agent/extensions/
+
+RUN npm install --no-package-lock --no-audit --no-fund --prefix /root/.pi/agent/extensions typebox
 
 WORKDIR /workspace
 

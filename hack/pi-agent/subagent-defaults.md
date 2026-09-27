@@ -20,5 +20,5 @@ Use `load_subagent_defaults` at the start of a session when the prompt may inclu
 
 - Accept both `sub-agent defaults` and the typo `sub-agent defauls`.
 - Never echo the base64 payload back to the user.
-- Stop on decode or validation errors.
-- Treat the extension output as the source of truth for `namespace`, `leaseDurationSeconds`, and `maxParallel`.
+- Stop on decode or validation errors, and if the current path cannot recover, call `exit_pi` with a non-zero `exitCode`.
+- Treat the extension output as the source of truth for decoded defaults like `namespace` and `maxParallel`, and rely on the embedded agent configuration/runtime defaults for hibernation and wake-up behavior.

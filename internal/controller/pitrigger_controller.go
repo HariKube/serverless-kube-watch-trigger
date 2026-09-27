@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,6 +64,10 @@ const (
 	piTriggerInputConfigMapAnnotation  = "triggers.harikube.info/input-configmap"
 	piTriggerEventTypeAnnotation       = "triggers.harikube.info/event-type"
 	piTriggerResourceVersionAnnotation = "triggers.harikube.info/resource-version"
+	piTriggerSessionLabel              = "harikube.info/session"
+	piTriggerRoundLabel                = "harikube.info/round"
+	piTriggerWorkerLabel               = "harikube.info/worker"
+	piTriggerSessionSecretAnnotation   = "harikube.info/session-secret"
 	piTriggerWorkerContainerName       = "pi-agent"
 	piTriggerInputVolumeName           = "pi-trigger-input"
 	piTriggerAgentSecretVolumeName     = "pi-agent-config"
@@ -76,6 +81,8 @@ const (
 	piTriggerAgentPromptsMountPath     = piTriggerAgentConfigMountPath + "/prompts"
 	piTriggerAgentSkillsMountPath      = piTriggerAgentConfigMountPath + "/skills"
 )
+
+var piTriggerSessionTriggerNamePattern = regexp.MustCompile(`^pi-subagent-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
 
 type piTriggerEventInput struct {
 	TriggerRefName    string                 `json:"triggerRefName"`
@@ -98,6 +105,10 @@ type piTriggerJobMetadata struct {
 	TimedOutLeaseName string `json:"timedOutLeaseName,omitempty"`
 }
 
+type piTriggerSession struct {
+	stop func()
+}
+
 // PiTriggerReconciler reconciles a PiTrigger object.
 type PiTriggerReconciler struct {
 	client.Client
@@ -108,9 +119,10 @@ type PiTriggerReconciler struct {
 	PartitionController *partition.Controller
 	DeletionWatcher     *triggerwatcher.GlobalDeletionWatcher
 
-	ctx                 context.Context
-	runningTriggersLock sync.Mutex
-	runningTriggers     map[string]func()
+	ctx                    context.Context
+	runningTriggersLock    sync.Mutex
+	runningTriggers        map[string]func()
+	runningTriggerSessions map[string]*piTriggerSession
 
 	triggerLocksLock sync.Mutex
 	triggerLocks     map[string]*sync.Mutex
@@ -140,9 +152,18 @@ func (r *PiTriggerReconciler) stopRunningTrigger(triggerRefName string) {
 }
 
 func (r *PiTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) {
+	stopped := false
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
 		cancel()
-		delete(r.runningTriggers, triggerRefName)
+		stopped = true
+	}
+	if session, ok := r.runningTriggerSessions[triggerRefName]; ok && session != nil {
+		session.stop()
+		stopped = true
+	}
+	delete(r.runningTriggers, triggerRefName)
+	delete(r.runningTriggerSessions, triggerRefName)
+	if stopped {
 		recordControllerSessionStop(metricControllerPiTrigger)
 	}
 	if r.DeletionWatcher != nil {
@@ -362,13 +383,86 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	jobCounter := sharedPiTriggerJobCounterRegistry.get(triggerRefName)
 	maxJobs := int(trigger.Spec.MaxJobs)
 
-	ctx, cancel := context.WithCancel(r.ctx)
+	sessionTimeout := trigger.Spec.Timeout.Duration
+	sessionCtx, sessionCancel := context.WithCancel(r.ctx)
+	ctx := sessionCtx
+	var timeoutCancel context.CancelFunc
+	if sessionTimeout > 0 {
+		remainingTimeout := time.Until(trigger.CreationTimestamp.Add(sessionTimeout))
+		ctx, timeoutCancel = context.WithTimeout(sessionCtx, remainingTimeout)
+	}
+
+	var stopSessionOnce sync.Once
+	stopSession := func() {
+		stopSessionOnce.Do(func() {
+			if timeoutCancel != nil {
+				timeoutCancel()
+			}
+			sessionCancel()
+		})
+	}
+
+	session := &piTriggerSession{stop: stopSession}
+
 	r.runningTriggersLock.Lock()
-	r.runningTriggers[triggerRefName] = cancel
+	if r.runningTriggers == nil {
+		r.runningTriggers = map[string]func(){}
+	}
+	if r.runningTriggerSessions == nil {
+		r.runningTriggerSessions = map[string]*piTriggerSession{}
+	}
+	r.runningTriggers[triggerRefName] = stopSession
+	r.runningTriggerSessions[triggerRefName] = session
 	r.runningTriggersLock.Unlock()
 	recordControllerSessionStart(metricControllerPiTrigger)
 	if r.DeletionWatcher != nil {
-		r.DeletionWatcher.RegisterTask(triggerRefName, cancel)
+		r.DeletionWatcher.RegisterTask(triggerRefName, stopSession)
+	}
+
+	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
+	triggerKey := client.ObjectKeyFromObject(trigger)
+	triggerUID := trigger.UID
+	triggerGeneration := trigger.Generation
+
+	handleSessionTimeout := func() {
+		logger.Info("Trigger session timed out", "timeout", sessionTimeout.String())
+
+		deleteCtx, deleteCancel := context.WithTimeout(r.ctx, 10*time.Second)
+		defer deleteCancel()
+
+		latest := &triggersv1.PiTrigger{}
+		if err := r.Get(deleteCtx, triggerKey, latest); err != nil {
+			if !apierrors.IsNotFound(err) {
+				logger.Error(err, "Timed out trigger fetch failed")
+			}
+		} else if latest.UID != triggerUID || latest.Generation != triggerGeneration {
+			logger.V(1).Info("Skipping timed out trigger deletion for stale session", "uid", latest.UID, "generation", latest.Generation)
+		} else if latest.GetDeletionTimestamp() == nil || latest.GetDeletionTimestamp().IsZero() {
+			if err := r.dispatchTriggerSessionTimeoutJob(deleteCtx, triggerRefName, latest); err != nil {
+				logger.Error(err, "Timed out trigger job dispatch failed")
+			}
+			if err := r.Delete(deleteCtx, latest); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "Timed out trigger deletion failed")
+			}
+		}
+
+		r.runningTriggersLock.Lock()
+		if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
+			r.stopRunningTriggerLocked(triggerRefName)
+		}
+		r.runningTriggersLock.Unlock()
+	}
+	if sessionTimeout > 0 {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			handleSessionTimeout()
+			return nil
+		}
+		go func() {
+			<-ctx.Done()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				handleSessionTimeout()
+			}
+		}()
 	}
 
 	listOpts := buildWatcherListOptions(resourceVersion, trigger.Spec.SendInitialEvents, trigger.Spec.LabelSelector, trigger.Spec.FieldSelector)
@@ -414,7 +508,7 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 		defer patchCancel()
 
 		latest := &triggersv1.PiTrigger{}
-		if err := r.Get(patchCtx, client.ObjectKeyFromObject(trigger), latest); err != nil {
+		if err := r.Get(patchCtx, triggerKey, latest); err != nil {
 			return
 		}
 		if latest.Generation != trigger.Generation {
@@ -431,7 +525,6 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 		_ = r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
 	}
 
-	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
 	logger.Info("Watcher started")
 
 	const (
@@ -630,12 +723,51 @@ func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName 
 		ResourceVersion:  rv,
 	}
 
-	workerPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec)
-	if err != nil {
-		return "", "", err
+	return r.createPiWorkerJob(ctx, triggerRefName, trigger, eventPayload, metadataPayload)
+}
+
+func (r *PiTriggerReconciler) dispatchTriggerSessionTimeoutJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger) error {
+	timedOutTrigger := trigger.DeepCopy()
+	if timedOutTrigger.GetDeletionTimestamp() == nil || timedOutTrigger.GetDeletionTimestamp().IsZero() {
+		timedOutTrigger.DeletionTimestamp = ptr.To(metav1.Now())
 	}
 
-	return r.createPiWorkerJob(ctx, triggerRefName, trigger, eventPayload, metadataPayload, workerPrompt)
+	payload, err := runtime.DefaultUnstructuredConverter.ToUnstructured(timedOutTrigger)
+	if err != nil {
+		return err
+	}
+
+	const timeoutMessage = "trigger session timed out"
+	rv := timedOutTrigger.GetResourceVersion()
+	if rv == "" {
+		rv = "0"
+	}
+	eventPayload := piTriggerEventInput{
+		TriggerRefName:   triggerRefName,
+		TriggerName:      timedOutTrigger.Name,
+		TriggerNamespace: timedOutTrigger.Namespace,
+		EventType:        string(triggersv1.EventTypeDeleted),
+		ResourceVersion:  rv,
+		Message:          timeoutMessage,
+		Object:           payload,
+	}
+	metadataPayload := piTriggerJobMetadata{
+		TriggerRefName:   triggerRefName,
+		TriggerName:      timedOutTrigger.Name,
+		TriggerNamespace: timedOutTrigger.Namespace,
+		EventType:        string(triggersv1.EventTypeDeleted),
+		ResourceVersion:  rv,
+		Message:          timeoutMessage,
+	}
+	_, _, err = r.createPiWorkerJob(
+		ctx,
+		triggerRefName,
+		timedOutTrigger,
+		eventPayload,
+		metadataPayload,
+		"TIMED_OUT: The trigger session timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.",
+	)
+	return err
 }
 
 func (r *PiTriggerReconciler) dispatchOwnerLeaseTimeoutJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger) error {
@@ -673,18 +805,18 @@ func (r *PiTriggerReconciler) dispatchOwnerLeaseTimeoutJob(ctx context.Context, 
 		Message:           timeoutMessage,
 		TimedOutLeaseName: leaseName,
 	}
-	prompt, err := buildPiTriggerWorkerPrompt(
-		trigger.Spec,
-		fmt.Sprintf("The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName),
+	_, _, err = r.createPiWorkerJob(
+		ctx,
+		triggerRefName,
+		trigger,
+		eventPayload,
+		metadataPayload,
+		fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName),
 	)
-	if err != nil {
-		return err
-	}
-	_, _, err = r.createPiWorkerJob(ctx, triggerRefName, trigger, eventPayload, metadataPayload, prompt)
 	return err
 }
 
-func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger, eventPayload piTriggerEventInput, metadataPayload piTriggerJobMetadata, workerPrompt string) (string, string, error) {
+func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger, eventPayload piTriggerEventInput, metadataPayload piTriggerJobMetadata, extraPromptSections ...string) (string, string, error) {
 	rv := eventPayload.ResourceVersion
 	if rv == "" {
 		return "", "", errors.New("watched object has no resourceVersion")
@@ -733,17 +865,20 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 		},
 	}
 	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
-	if !persistAfterTriggerDeletion {
-		if err := controllerutil.SetControllerReference(trigger, configMap, r.Scheme); err != nil {
-			return "", "", err
-		}
+	if err := r.setPiTriggerInputOwnerReference(ctx, trigger, configMap); err != nil {
+		return "", "", err
 	}
 	if err := r.Create(ctx, configMap); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", "", err
 	}
 
+	workerPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, jobName, extraPromptSections...)
+	if err != nil {
+		return "", "", err
+	}
 	workerArgs := buildPiTriggerWorkerArgs(workerPrompt, trigger.Spec.Agent)
 	activeDeadlineSeconds := resolvePiTriggerActiveDeadlineSeconds(trigger.Spec.Agent)
+	ttlSecondsAfterFinished := resolvePiTriggerTTLSecondsAfterFinished(trigger.Spec.Agent)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -762,7 +897,7 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            trigger.Spec.Agent.BackoffLimit,
 			ActiveDeadlineSeconds:   activeDeadlineSeconds,
-			TTLSecondsAfterFinished: trigger.Spec.Agent.TTLSecondsAfterFinished,
+			TTLSecondsAfterFinished: ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -840,6 +975,28 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 	return jobName, rv, nil
 }
 
+func (r *PiTriggerReconciler) setPiTriggerInputOwnerReference(ctx context.Context, trigger *triggersv1.PiTrigger, configMap *corev1.ConfigMap) error {
+	if trigger == nil || configMap == nil {
+		return nil
+	}
+
+	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
+	if !persistAfterTriggerDeletion {
+		return controllerutil.SetControllerReference(trigger, configMap, r.Scheme)
+	}
+
+	sessionSecretName := strings.TrimSpace(trigger.GetAnnotations()[piTriggerSessionSecretAnnotation])
+	if sessionSecretName == "" {
+		return nil
+	}
+
+	sessionSecret := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: sessionSecretName}, sessionSecret); err != nil {
+		return err
+	}
+	return controllerutil.SetControllerReference(sessionSecret, configMap, r.Scheme)
+}
+
 func (r *PiTriggerReconciler) expiredOwnerLeaseName(ctx context.Context, trigger *triggersv1.PiTrigger, now time.Time) (string, bool, error) {
 	if trigger == nil {
 		return "", false, nil
@@ -882,21 +1039,68 @@ func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, 
 	return strings.Join(parts, "; ")
 }
 
-func buildPiTriggerWorkerPrompt(triggerSpec triggersv1.PiTriggerSpec, extraSections ...string) (string, error) {
-	triggerSpecSkill, err := buildPiTriggerSpecSkill(triggerSpec)
+func buildRecoverablePiTriggerWorkerPrompt(trigger *triggersv1.PiTrigger, jobName string, extraSections ...string) (string, error) {
+	triggerSpecSkill, err := buildPiTriggerSpecSkill(trigger.Spec)
 	if err != nil {
 		return "", err
 	}
 
-	sections := []string{
-		triggerSpecSkill,
+	sections := []string{triggerSpecSkill}
+	if wakeupPrompt := buildPiTriggerWakeupPrompt(trigger, jobName); wakeupPrompt != "" {
+		sections = append(sections, wakeupPrompt)
+	}
+	sections = append(sections,
 		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the provided event payload.",
 		fmt.Sprintf("The triggering Kubernetes event payload is available in the container at %s.", piTriggerEventFilePath),
 		fmt.Sprintf("Trigger metadata is available in the container at %s.", piTriggerMetadataFilePath),
-	}
+	)
 	sections = append(sections, extraSections...)
 	sections = append(sections, "Use pi tools to inspect these files as needed before acting.")
 	return strings.Join(sections, "\n\n"), nil
+}
+
+func buildPiTriggerWakeupPrompt(trigger *triggersv1.PiTrigger, jobName string) string {
+	if trigger == nil {
+		return ""
+	}
+
+	sessionID := strings.TrimSpace(trigger.GetLabels()[piTriggerSessionLabel])
+	round := strings.TrimSpace(trigger.GetLabels()[piTriggerRoundLabel])
+	workerIndex := strings.TrimSpace(trigger.GetLabels()[piTriggerWorkerLabel])
+	if derivedSessionID, derivedRound, derivedWorkerIndex, ok := parsePiTriggerSessionIdentity(trigger.Name); ok {
+		if sessionID == "" {
+			sessionID = derivedSessionID
+		}
+		if round == "" {
+			round = derivedRound
+		}
+		if workerIndex == "" {
+			workerIndex = derivedWorkerIndex
+		}
+	}
+	if sessionID == "" || round == "" || workerIndex == "" {
+		return ""
+	}
+
+	lines := []string{
+		fmt.Sprintf("Session ID: %s", sessionID),
+		fmt.Sprintf("Namespace: %s", trigger.Namespace),
+		fmt.Sprintf("Session Secret Label: %s=%s", piTriggerSessionLabel, sessionID),
+		fmt.Sprintf("Round: %s", round),
+		fmt.Sprintf("Worker Index: %s", workerIndex),
+	}
+	if jobName != "" {
+		lines = append(lines, fmt.Sprintf("Job: %s", jobName))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parsePiTriggerSessionIdentity(triggerName string) (string, string, string, bool) {
+	matches := piTriggerSessionTriggerNamePattern.FindStringSubmatch(strings.TrimSpace(triggerName))
+	if len(matches) != 4 {
+		return "", "", "", false
+	}
+	return matches[1], matches[2], matches[3], true
 }
 
 func buildPiTriggerSpecSkill(triggerSpec triggersv1.PiTriggerSpec) (string, error) {
@@ -944,6 +1148,13 @@ func resolvePiTriggerActiveDeadlineSeconds(agent triggersv1.PiAgentSpec) *int64 
 		seconds = 1
 	}
 	return ptr.To(seconds)
+}
+
+func resolvePiTriggerTTLSecondsAfterFinished(agent triggersv1.PiAgentSpec) *int32 {
+	if agent.TTLSecondsAfterFinished != nil {
+		return agent.TTLSecondsAfterFinished
+	}
+	return ptr.To(int32(86400))
 }
 
 func (r *PiTriggerReconciler) latestDispatchedResourceVersion(ctx context.Context, trigger *triggersv1.PiTrigger) (string, error) {
@@ -1057,11 +1268,14 @@ func (r *PiTriggerReconciler) WatchInit(ctx context.Context) error {
 		triggerMu.Unlock()
 		if initErr != nil {
 			r.runningTriggersLock.Lock()
-			for runningRef := range r.runningTriggers {
-				if cancelFn, ok := r.runningTriggers[runningRef]; ok {
+			for runningRef, cancelFn := range r.runningTriggers {
+				if session, ok := r.runningTriggerSessions[runningRef]; ok && session != nil {
+					session.stop()
+				} else {
 					cancelFn()
-					delete(r.runningTriggers, runningRef)
 				}
+				delete(r.runningTriggers, runningRef)
+				delete(r.runningTriggerSessions, runningRef)
 			}
 			r.runningTriggersLock.Unlock()
 			return initErr
@@ -1076,6 +1290,7 @@ func (r *PiTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 	r.Recorder = mgr.GetEventRecorderFor("pitrigger-controller")
 	r.runningTriggersLock = sync.Mutex{}
 	r.runningTriggers = map[string]func(){}
+	r.runningTriggerSessions = map[string]*piTriggerSession{}
 	r.triggerLocksLock = sync.Mutex{}
 	r.triggerLocks = map[string]*sync.Mutex{}
 	r.init()
@@ -1124,6 +1339,7 @@ func (r *PiTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 			if time.Since(drainStart) >= 30*time.Second {
 				r.runningTriggersLock.Lock()
 				r.runningTriggers = map[string]func(){}
+				r.runningTriggerSessions = map[string]*piTriggerSession{}
 				r.runningTriggersLock.Unlock()
 				return
 			}

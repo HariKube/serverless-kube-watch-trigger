@@ -5,8 +5,8 @@ const ProposedAction = Type.Union([Type.Literal('stay-local'), Type.Literal('del
 
 export default function registerDecisionMaker(pi) {
   pi.registerTool({
-    name: 'decide_subagent_strategy',
-    label: 'decide_subagent_strategy',
+    name: 'decision_maker',
+    label: 'decision_maker',
     description:
       'Validate whether work should stay local or be delegated to sub-agents using the shared delegation guidelines.',
     parameters: Type.Object({

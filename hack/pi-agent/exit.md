@@ -18,3 +18,5 @@ Use `exit_pi` only as the final tool call on a path.
 - Keep `reason` short and non-sensitive.
 - Do not make more tool calls after `exit_pi`.
 - Use a larger `delayMs` only when logs are getting cut off.
+- Use `exitCode: 0` (or omit it) for normal success, intentional waiting, or other non-error termination.
+- Use a non-zero `exitCode` for non-fixable errors such as invalid input, missing required session state, or failed validation that the current path cannot recover from.

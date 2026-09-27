@@ -471,6 +471,7 @@ func (in *TriggerSpec) DeepCopyInto(out *TriggerSpec) {
 		*out = make([]EventType, len(*in))
 		copy(*out, *in)
 	}
+	out.Timeout = in.Timeout
 	out.LockDuration = in.LockDuration
 }
 

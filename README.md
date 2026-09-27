@@ -234,8 +234,7 @@ family:
 | `delivery_retries_total`                      | `kind`, `trigger`, `method`, `result`   | Retry attempts.                          |
 | `delivery_backoffs_total`                     | `kind`, `trigger`                       | Deliveries delayed by the failure gate.  |
 
-`kind` is `httptrigger` or `aitrigger` for outgoing endpoint metrics; `pitrigger`
-is also used when PiTrigger executions are delayed by the shared failure gate.
+`kind` is `httptrigger` for outgoing HTTP endpoint metrics; `pitrigger` is used for PiTrigger-related deliveries and when PiTrigger executions are delayed by the shared failure gate.
 In all cases, `trigger` is the `namespace/name` of the trigger instance.
 
 ---
@@ -281,7 +280,8 @@ spec:
     - ADDED
     - MODIFIED
   eventFilter: 'ne .status.availableReplicas 0'
-  lockDuration: 45s
+  lockDuration: 5m # Optional, enables annotation locking for this trigger using a 5m lease
+  timeout: 24h # Optional, limits the watcher/session lifetime for this PiTrigger (enforced from trigger creation timestamp; not reset on reconcile)
 
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
@@ -388,27 +388,28 @@ data:
 
 Sample manifests are also available under `config/samples/`.
 
-### Ephemeral AI Triggers & Sleep/Wake Agent Orchestration
+### Ephemeral PiTrigger Sessions & Sleep/Wake Agent Orchestration
 
-HariKube introduces a zero-overhead, event-driven pattern for multi-agent workflows: **Ephemeral Triggers backed by Native Kubernetes Leases**.
+HariKube supports a zero-idle, event-driven pattern for multi-agent workflows using **session Secrets plus short-lived worker `PiTrigger`s**. This is distinct from `spec.lockDuration`, which still applies only to the optional per-trigger reconcile lease described above.
 
-Instead of keeping heavy agent processes, long-lived WebSocket connections, or external polling loops continuously running in memory, agents can dynamically create short-lived, self-expiring event watchers `PITrigger`, persist their execution state to the control plane or event stream, and yield compute resources entirely until woken up.
+Instead of keeping heavy agent processes, long-lived WebSocket connections, or external polling loops continuously running in memory, agents can persist session state in Kubernetes, create temporary worker watchers, and yield compute resources entirely until woken up.
 
 #### How It Works
 
-1. **Transient Registration:** When a parent agent spawns long-running subagent tasks, it creates an `AITrigger` attached to a `coordination.k8s.io/v1` `Lease` resource using standard Kubernetes `OwnerReferences`.
-2. **Stateless Offloading:** Before going idle, the agent persists its exact execution context, variables, and step checkpoint directly to the Kubernetes API Server (as a Status field, Annotation, or ConfigMap) or flushes it to the HariKube Kafka event stream.
-3. **Resource-Yielding Sleep:** The parent process yields memory and execution threads. The cluster consumes **zero idle compute resources** while waiting for subagents to report back.
-4. **Partitioned Storage-Side Wake-Up:** When a subagent completes its work (e.g., updating a CRD or posting a result), HariKube's storage-side filtered watch engine identifies the event and routes it directly to a leaderless worker (scaling up to 100+ parallel Go goroutines).
-5. **State Reload & Resume:** The awakened worker loads the persisted state snapshot from Kafka or the API Server, restores context, and resumes execution seamlessly.
-6. **Self-Cleaning Lifecycle:** Once the event is delivered—or if a lease expires without renewal—Kubernetes Garbage Collection automatically sweeps the temporary trigger. No leftover state, no manual `DELETE` cleanup calls.
+1. **Create or Update the Session Secret:** When a parent agent hibernates, it first writes the session context and worker plan into a Kubernetes Secret.
+2. **Refetch the Secret for Its UID:** The flow then reads that Secret back so the real Kubernetes UID is known and can be used for owner references.
+3. **Create Secret-Owned Worker Watchers:** Only after that second pass does the parent create one worker `PiTrigger` per pending sub-agent, with each worker trigger owned by the session Secret.
+4. **Job-Watch Fan-Out:** Each worker `PiTrigger` watches the matching worker Job, and when needed creates the `pi` Job plus its input ConfigMap for that worker flow; those worker resources are owned by the `PiTrigger`, not directly by the Secret.
+5. **Timeout-Bounded Sessions:** `spec.timeout` limits the lifetime of the worker watcher/session and is enforced from the trigger's creation timestamp (it is not restarted on each reconcile); when it expires the controller emits a final deleted-event timeout cleanup (PiTrigger: a final cleanup Job/message; HTTPTrigger: a deleted-event timeout callback/message) and then removes the timed-out trigger.
+6. **State Reload & Resume:** When a worker reports back, the wake-up flow reads the stored session Secret, records the result, and resumes the parent with the accumulated context.
+7. **Terminal Cleanup by Secret Deletion:** Final cleanup deletes the session Secret, which garbage-collects the Secret-owned worker `PiTrigger`s; each `PiTrigger` then cleans up its owned Jobs and input ConfigMaps.
 
 #### What Is It Good For?
 
 * **Zero-Idle Multi-Agent Workflows:** Run complex multi-step AI pipelines without paying for idle server time. Agents only consume resources when actively processing data.
 * **Resilient Distributed Checkpointing:** Since execution state is committed to Kafka or the Kubernetes API Server before sleeping, agents can survive node restarts, rescheduling, or pod evictions without losing progress.
 * **Leaderless Parallel Concurrency:** Bypasses traditional single-leader `etcd` bottlenecks. Hundreds of transient triggers can reconcile simultaneously across independent storage partition workers.
-* **No External Queue Dependencies:** Eliminates the need for Redis, Celery, or external pub/sub brokers. Distributed locking, event routing, and TTL state are handled natively by Kubernetes control plane primitives with atomic Optimistic Concurrency Control (OCC).
+* **No External Queue Dependencies:** Eliminates the need for Redis, Celery, or external pub/sub brokers. Session persistence, watch fan-out, and cleanup stay inside native Kubernetes objects and controller workflows.
 * **Native RBAC & Network Security:** Ephemeral agent triggers inherit standard Kubernetes security semantics out of the box—no custom permission systems required.
 
 ### Building a custom PiTrigger worker image
@@ -503,7 +504,9 @@ This is the easiest way to ship team-specific prompts, reusable skills, or per-e
 * `promptsConfigMapRef` and `skillsConfigMapRef` are mounted on top of that same worker home.
 * `provider`, `model`, `noExtensions`, and `extensions` are passed to `pi` as container args.
 * `workingDir` is applied as the container working directory.
-* `timeout` is applied to the Job runtime by defaulting `activeDeadlineSeconds` when that field is not set explicitly.
+* Trigger-level `spec.timeout` limits the watcher/session lifetime for the trigger and is enforced from the trigger's creation timestamp (not reset on reconcile); when it expires the controller emits a final deleted-event timeout cleanup (PiTrigger: final cleanup Job/message; HTTPTrigger: deleted-event timeout callback/message) before deleting the trigger.
+* Agent-level `spec.agent.timeout` limits worker runtime by defaulting `activeDeadlineSeconds` when that field is not set explicitly.
+* `ttlSecondsAfterFinished` defaults to `86400` seconds (`24h`) when unset.
 * `workingDir` should exist in the image, for example `/workspace`.
 * If your prompts run shell commands, install the required binaries in the image.
 
@@ -512,10 +515,10 @@ This is the easiest way to ship team-specific prompts, reusable skills, or per-e
 `PiTrigger` supports the same:
 
 * resource selection (`resource`, `namespaces`, `labelSelectors`, `fieldSelectors`, `eventTypes`, `eventFilter`)
-* watcher controls (`concurrency`, `sendInitialEvents`, `lockDuration`)
+* watcher controls (`concurrency`, `sendInitialEvents`, `timeout`, `lockDuration`)
 * status handling and automatic watcher restart behavior
 
-In addition, `spec.agent` defines the spawned worker Job:
+In addition, `spec.timeout` controls the watcher/session lifetime and is enforced from the trigger's creation timestamp (not reset on reconcile); `spec.agent` defines the spawned worker Job:
 
 | Field | Description |
 | --- | --- |
@@ -528,7 +531,7 @@ In addition, `spec.agent` defines the spawned worker Job:
 | `workingDir` | Optional working directory used by the worker container. |
 | `noExtensions` | Optional flag controlling ambient pi extension loading; defaults to `true`. |
 | `extensions` | Optional explicit pi extensions to load for the worker. |
-| `timeout` | Optional runtime limit that defaults `activeDeadlineSeconds` when not set explicitly. |
+| `timeout` | Optional worker runtime limit that defaults `activeDeadlineSeconds` when not set explicitly. |
 | `serviceAccountName` | Optional ServiceAccount override for spawned Jobs. |
 | `imagePullPolicy` | Optional pull policy for the worker image. |
 | `env` | Optional extra environment variables added to the worker container. |
@@ -536,11 +539,12 @@ In addition, `spec.agent` defines the spawned worker Job:
 | `resources` | Optional CPU and memory requests and limits for the worker container. |
 | `backoffLimit` | Optional Kubernetes Job retry limit for a failed worker. |
 | `activeDeadlineSeconds` | Optional maximum total runtime for a worker Job. |
-| `ttlSecondsAfterFinished` | Optional automatic cleanup TTL for completed Jobs. |
+| `ttlSecondsAfterFinished` | Optional automatic cleanup TTL for completed Jobs; defaults to `86400` seconds (`24h`) when unset. |
 
 ### Notes
 
-* Each matching event produces a ConfigMap with `event.json` and `metadata.json`, then the operator creates a Job to run `pi`.
+* Each matching event produces an input ConfigMap with `event.json` and `metadata.json`, then the operator creates a Job to run `pi`; the `PiTrigger` normally owns both resources.
+* In session-hibernation fan-out, worker `PiTrigger`s are created in a second pass after the session Secret exists and its UID has been read back; the Secret owns those worker triggers, and each worker `PiTrigger` owns its own Job and input ConfigMap.
 * `event.json` contains the watched object payload and `metadata.json` contains trigger and resource-version metadata for the run.
 * Use `promptsConfigMapRef` and `skillsConfigMapRef` to ship custom prompts and skills with the worker image.
 * The Job keeps the image `ENTRYPOINT` and passes `pi` runtime options through container args.
@@ -549,7 +553,7 @@ In addition, `spec.agent` defines the spawned worker Job:
 
 ### 🧪 Debugging
 
-* Use `kubectl describe httptrigger <name>`, `kubectl describe aitrigger <name>`, or `kubectl describe pitrigger <name>` to inspect status and events.
+* Use `kubectl describe httptrigger <name>` or `kubectl describe pitrigger <name>` to inspect status and events.
 * Check controller logs for the trigger type you are debugging, and inspect spawned PiTrigger Jobs with `kubectl get jobs` / `kubectl logs job/<name>` when using `PiTrigger`.
 * Use `toPrettyJson` in templates to make payloads human-readable during testing.
 
@@ -588,7 +592,7 @@ make deploy IMG=<some-registry>/serverless-kube-watch-trigger:tag
 privileges or be logged in as admin.
 
 **Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+You can apply the samples (examples) from the config/samples/:
 
 ```sh
 kubectl apply -k config/samples/

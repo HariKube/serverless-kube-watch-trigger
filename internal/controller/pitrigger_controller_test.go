@@ -399,11 +399,12 @@ var _ = Describe("PiTrigger Controller", func() {
 
 	Context("Reconcile - successful Pi job dispatch", func() {
 		const (
-			triggerName   = "pitrigger-success"
-			configMapName = "pitrigger-configmap"
-			secretName    = "pitrigger-agent-config"
-			promptsCMName = "pitrigger-agent-prompts"
-			skillsCMName  = "pitrigger-agent-skills"
+			triggerName       = "pitrigger-success"
+			configMapName     = "pitrigger-configmap"
+			secretName        = "pitrigger-agent-config"
+			sessionSecretName = "pitrigger-session-secret"
+			promptsCMName     = "pitrigger-agent-prompts"
+			skillsCMName      = "pitrigger-agent-skills"
 		)
 
 		AfterEach(func() {
@@ -411,6 +412,7 @@ var _ = Describe("PiTrigger Controller", func() {
 			cleanupConfigMap(bgCtx, promptsCMName)
 			cleanupConfigMap(bgCtx, skillsCMName)
 			cleanupPiTrigger(bgCtx, triggerName)
+			cleanupSecret(bgCtx, sessionSecretName)
 			cleanupSecret(bgCtx, secretName)
 		})
 
@@ -474,12 +476,22 @@ var _ = Describe("PiTrigger Controller", func() {
 
 		It("renders prompt input and creates a worker Job per event", func() {
 			createPiAgentConfigSecret(bgCtx, secretName)
+			createPiAgentConfigSecret(bgCtx, sessionSecretName)
 			createPiAgentConfigMaps(bgCtx, promptsCMName, skillsCMName)
 			backoffLimit := int32(4)
 			ttlSeconds := int32(300)
 			workerTimeout := metav1.Duration{Duration: 7 * time.Minute}
 			trigger := &triggersv1.PiTrigger{
-				ObjectMeta: metav1.ObjectMeta{Name: triggerName, Namespace: ns},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      triggerName,
+					Namespace: ns,
+					Labels: map[string]string{
+						piTriggerSessionLabel: "session-success",
+						piTriggerRoundLabel:   "4",
+						piTriggerWorkerLabel:  "2",
+					},
+					Annotations: map[string]string{piTriggerSessionSecretAnnotation: sessionSecretName},
+				},
 				Spec: triggersv1.PiTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{
 						Resource:      metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
@@ -551,8 +563,12 @@ var _ = Describe("PiTrigger Controller", func() {
 			container := job.Spec.Template.Spec.Containers[0]
 			Expect(container.Image).To(Equal("docker.io/mhmxs/pi-agent-empty:latest"))
 			Expect(container.Command).To(BeEmpty())
-			expectedPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec)
+			expectedPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(expectedPrompt).To(ContainSubstring("Session ID: session-success"))
+			Expect(expectedPrompt).To(ContainSubstring("Round: 4"))
+			Expect(expectedPrompt).To(ContainSubstring("Worker Index: 2"))
+			Expect(expectedPrompt).To(ContainSubstring("Job: " + job.Name))
 			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
 			expectedSpecJSON, err := json.Marshal(trigger.Spec)
 			Expect(err).NotTo(HaveOccurred())
@@ -572,6 +588,12 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(inputConfigMapName).NotTo(BeEmpty())
 			inputConfigMap := &corev1.ConfigMap{}
 			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
+			Expect(inputConfigMap.OwnerReferences).To(HaveLen(1))
+			Expect(inputConfigMap.OwnerReferences[0].APIVersion).To(Equal(triggersv1.GroupVersion.String()))
+			Expect(inputConfigMap.OwnerReferences[0].Kind).To(Equal("PiTrigger"))
+			Expect(inputConfigMap.OwnerReferences[0].Name).To(Equal(trigger.Name))
+			Expect(inputConfigMap.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*inputConfigMap.OwnerReferences[0].Controller).To(BeTrue())
 			Expect(inputConfigMap.Data).NotTo(HaveKey("worker_config.json"))
 			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "ADDED"`))
 			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(`"triggerName": "pitrigger-success"`))
@@ -895,11 +917,12 @@ var _ = Describe("PiTrigger Controller", func() {
 
 	Context("Reconcile - deleted trigger owner lease timeout job", func() {
 		const (
-			name          = "pitrigger-owner-lease-timeout"
-			secretName    = "pitrigger-owner-lease-timeout-secret"
-			promptsCMName = "pitrigger-owner-lease-timeout-prompts"
-			skillsCMName  = "pitrigger-owner-lease-timeout-skills"
-			leaseName     = "pitrigger-owner-lease-timeout-lease"
+			name              = "pitrigger-owner-lease-timeout"
+			secretName        = "pitrigger-owner-lease-timeout-secret"
+			sessionSecretName = "pitrigger-owner-lease-timeout-session"
+			promptsCMName     = "pitrigger-owner-lease-timeout-prompts"
+			skillsCMName      = "pitrigger-owner-lease-timeout-skills"
+			leaseName         = "pitrigger-owner-lease-timeout-lease"
 		)
 
 		AfterEach(func() {
@@ -926,11 +949,13 @@ var _ = Describe("PiTrigger Controller", func() {
 			}
 			cleanupConfigMap(bgCtx, promptsCMName)
 			cleanupConfigMap(bgCtx, skillsCMName)
+			cleanupSecret(bgCtx, sessionSecretName)
 			cleanupSecret(bgCtx, secretName)
 		})
 
 		It("dispatches a timeout job with a timed out prompt when a deleting trigger is owned by an expired lease", func() {
 			createPiAgentConfigSecret(bgCtx, secretName)
+			createPiAgentConfigSecret(bgCtx, sessionSecretName)
 			createPiAgentConfigMaps(bgCtx, promptsCMName, skillsCMName)
 
 			renewTime := metav1.NewMicroTime(time.Now().Add(-2 * time.Minute))
@@ -948,6 +973,12 @@ var _ = Describe("PiTrigger Controller", func() {
 					Name:       name,
 					Namespace:  ns,
 					Finalizers: []string{"tests.harikube.io/cleanup"},
+					Labels: map[string]string{
+						piTriggerSessionLabel: "session-timeout",
+						piTriggerRoundLabel:   "7",
+						piTriggerWorkerLabel:  "1",
+					},
+					Annotations: map[string]string{piTriggerSessionSecretAnnotation: sessionSecretName},
 					OwnerReferences: []metav1.OwnerReference{{
 						APIVersion: coordinationv1.SchemeGroupVersion.String(),
 						Kind:       "Lease",
@@ -991,15 +1022,29 @@ var _ = Describe("PiTrigger Controller", func() {
 
 			job := jobList.Items[0]
 			Expect(job.OwnerReferences).To(BeEmpty())
+			Expect(job.Spec.TTLSecondsAfterFinished).NotTo(BeNil())
+			Expect(*job.Spec.TTLSecondsAfterFinished).To(Equal(int32(86400)))
+			Expect(job.Spec.ActiveDeadlineSeconds).To(BeNil())
 			container := job.Spec.Template.Spec.Containers[0]
-			expectedPrompt, err := buildPiTriggerWorkerPrompt(trigger.Spec, fmt.Sprintf("The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName))
+			expectedPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name, fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName))
 			Expect(err).NotTo(HaveOccurred())
+			Expect(expectedPrompt).To(ContainSubstring("TIMED_OUT"))
+			Expect(expectedPrompt).To(ContainSubstring(fmt.Sprintf("owner lease %s timed out", leaseName)))
+			Expect(expectedPrompt).To(ContainSubstring("Session ID: session-timeout"))
+			Expect(expectedPrompt).To(ContainSubstring("Round: 7"))
+			Expect(expectedPrompt).To(ContainSubstring("Worker Index: 1"))
+			Expect(expectedPrompt).To(ContainSubstring("Job: " + job.Name))
 			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
 
 			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
 			inputConfigMap := &corev1.ConfigMap{}
 			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
-			Expect(inputConfigMap.OwnerReferences).To(BeEmpty())
+			Expect(inputConfigMap.OwnerReferences).To(HaveLen(1))
+			Expect(inputConfigMap.OwnerReferences[0].APIVersion).To(Equal("v1"))
+			Expect(inputConfigMap.OwnerReferences[0].Kind).To(Equal("Secret"))
+			Expect(inputConfigMap.OwnerReferences[0].Name).To(Equal(sessionSecretName))
+			Expect(inputConfigMap.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*inputConfigMap.OwnerReferences[0].Controller).To(BeTrue())
 			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "DELETED"`))
 			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
 			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Name))

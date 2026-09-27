@@ -21,7 +21,8 @@ spec:
   concurrency: 2
   maxJobs: 4
   sendInitialEvents: false
-  lockDuration: 45s
+  timeout: 30m # Watcher/session timeout for the trigger itself.
+  lockDuration: 45s # Separate reconcile-lock duration.
 
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
@@ -39,7 +40,7 @@ spec:
     noExtensions: true
     extensions:
       - npm:pi-graft
-    timeout: 10m
+    timeout: 10m # Per-agent job runtime timeout.
     env:
       - name: PI_ENVIRONMENT
         value: production

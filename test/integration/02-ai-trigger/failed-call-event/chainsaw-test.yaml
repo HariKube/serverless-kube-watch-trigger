@@ -57,6 +57,7 @@ spec:
             name: pi-trigger-secondary
             namespace: pi-trigger-secondary
           spec:
+            timeout: 10m # trigger/session timeout
             resource:
               apiVersion: v1
               kind: ConfigMap

@@ -107,7 +107,86 @@ function normalizeOwnerReference(value, label) {
   };
 }
 
-function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedPrompt) {
+function createWorkerTriggerName(sessionId, round, index) {
+  return trimKubeName(`pi-session-${randomUUID().replace(/-/g, '').slice(0, 8)}-${sessionId}-r${round}-w${index}-trigger`);
+}
+
+const PI_TRIGGER_JOB_NAME_LABEL = 'triggers.harikube.info/pitrigger-name';
+
+function buildSessionCleanup({ sessionId, namespace, secretName, round, workers }) {
+  const workerCleanup = Array.isArray(workers)
+    ? workers
+        .map(candidate => {
+          const index = Number(candidate?.index);
+          const triggerName = typeof candidate?.triggerName === 'string' ? candidate.triggerName.trim() : '';
+          if (!Number.isInteger(index) || index < 1 || !triggerName) {
+            return undefined;
+          }
+          const labelSelector = `${PI_TRIGGER_JOB_NAME_LABEL}=${triggerName}`;
+          return {
+            index,
+            triggerName,
+            piTrigger: {
+              apiVersion: 'triggers.harikube.info/v1',
+              kind: 'PiTrigger',
+              name: triggerName,
+              namespace
+            },
+            job: {
+              apiVersion: 'batch/v1',
+              kind: 'Job',
+              namespace,
+              labelSelector
+            },
+            inputConfigMap: {
+              apiVersion: 'v1',
+              kind: 'ConfigMap',
+              namespace,
+              labelSelector
+            }
+          };
+        })
+        .filter(Boolean)
+    : [];
+
+  return {
+    sessionId,
+    round,
+    namespace,
+    sessionSecret: {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      name: secretName,
+      namespace
+    },
+    workerTriggerNames: workerCleanup.map(worker => worker.triggerName),
+    workers: workerCleanup
+  };
+}
+
+function buildTerminalJobConditionFilter(index) {
+  return [
+    `(and (gt (len .status.conditions) ${index})`,
+    `(eq (index (index .status.conditions ${index}) "status") "True")`,
+    '(or',
+    `(eq (index (index .status.conditions ${index}) "type") "Complete")`,
+    `(eq (index (index .status.conditions ${index}) "type") "Failed")))`
+  ].join(' ');
+}
+
+const TERMINAL_JOB_EVENT_FILTER = [
+  'or',
+  '.status.completionTime',
+  '(and .status.conditions',
+  '(or',
+  buildTerminalJobConditionFilter(0),
+  buildTerminalJobConditionFilter(1),
+  buildTerminalJobConditionFilter(2),
+  buildTerminalJobConditionFilter(3),
+  '))'
+].join(' ');
+
+function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedPrompt, previousWorker) {
   const raw = ensureObject(worker, 'worker');
   const index = ensureInteger(raw.index, 'worker.index', { min: 1 });
   const task = ensureString(raw.task, `worker ${index} task`);
@@ -115,8 +194,12 @@ function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedP
   const outputLocation = typeof raw.outputLocation === 'string' ? raw.outputLocation.trim() : '';
   const completed = Boolean(raw.completed);
   const result = typeof raw.result === 'string' ? raw.result.trim() : undefined;
-  const leaseName = trimKubeName(`pi-subagent-${sessionId}-r${round}-w${index}`);
-  const triggerName = trimKubeName(`${leaseName}-trigger`);
+  const triggerNameSource =
+    (typeof raw.triggerName === 'string' && raw.triggerName.trim()) ||
+    (typeof previousWorker?.triggerName === 'string' && previousWorker.triggerName.trim());
+  const triggerName = triggerNameSource
+    ? ensureName(triggerNameSource, `worker ${index} triggerName`)
+    : createWorkerTriggerName(sessionId, round, index);
   const prompt = buildWorkerPrompt({
     defaults,
     sessionId,
@@ -134,7 +217,6 @@ function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedP
     completed,
     result,
     namespace,
-    leaseName,
     triggerName,
     prompt
   };
@@ -164,11 +246,19 @@ export function normalizeSubAgentDefaults(rawDefaults, fallbackNamespace = 'defa
     ensureName(agent.serviceAccountName, 'subAgentDefaults.agent.serviceAccountName');
   }
 
+  const piTriggerTimeout =
+    typeof raw.piTriggerTimeout === 'string' && raw.piTriggerTimeout.trim()
+      ? raw.piTriggerTimeout.trim()
+      : typeof agent.timeout === 'string' && agent.timeout.trim()
+      ? ensureString(agent.timeout, 'subAgentDefaults.agent.timeout')
+      : '24h';
+
   return {
     ...clone(raw),
     namespace,
     leaseDurationSeconds,
     maxParallel,
+    piTriggerTimeout,
     agent
   };
 }
@@ -357,11 +447,34 @@ export function prepareSessionHibernation({
     sourceOwnerReference ?? previous?.sourceOwnerReference,
     'sourceOwnerReference'
   );
-  const ownerReferences = resolvedOwnerReference ? [resolvedOwnerReference] : undefined;
+  const secretOwnerReferences = resolvedOwnerReference ? [resolvedOwnerReference] : undefined;
+  const previousWorkersByIndex =
+    previous?.round === resolvedRound && Array.isArray(previous?.workers)
+      ? new Map(
+          previous.workers
+            .map(candidate => [Number(candidate?.index), candidate])
+            .filter(([index]) => Number.isInteger(index) && index >= 1)
+        )
+      : new Map();
   const normalizedWorkers = rawWorkers.map(worker =>
-    normalizeWorker(worker, defaults, resolvedSessionId, defaults.namespace, resolvedRound, normalizedPrompt)
+    normalizeWorker(
+      worker,
+      defaults,
+      resolvedSessionId,
+      defaults.namespace,
+      resolvedRound,
+      normalizedPrompt,
+      previousWorkersByIndex.get(Number(worker?.index))
+    )
   );
   const pendingWorkers = normalizedWorkers.filter(worker => !worker.completed);
+  const cleanup = buildSessionCleanup({
+    sessionId: resolvedSessionId,
+    namespace: defaults.namespace,
+    secretName: resolvedSecretName,
+    round: resolvedRound,
+    workers: normalizedWorkers
+  });
   const existingSecret = existingSecretJson ? resolveSecret(existingSecretJson) : undefined;
 
   if (existingSecret) {
@@ -377,6 +490,22 @@ export function prepareSessionHibernation({
     }
   }
 
+  const existingSecretUid =
+    typeof existingSecret?.metadata?.uid === 'string' && existingSecret.metadata.uid.trim()
+      ? existingSecret.metadata.uid.trim()
+      : undefined;
+  const triggerOwnerReferences = existingSecretUid
+    ? [
+        {
+          apiVersion: 'v1',
+          kind: 'Secret',
+          name: resolvedSecretName,
+          uid: existingSecretUid
+        }
+      ]
+    : undefined;
+  const requiresSecretOwnershipPass = pendingWorkers.length > 0 && !existingSecretUid;
+
   const context = {
     operation: 'pi-session-hibernate',
     id: resolvedSessionId,
@@ -389,7 +518,9 @@ export function prepareSessionHibernation({
     workSoFar,
     nextStep: next,
     workers: normalizedWorkers.map(({ prompt, ...worker }) => worker),
+    cleanup,
     ...(resolvedOwnerReference ? { sourceOwnerReference: resolvedOwnerReference } : {}),
+    requiresSecretOwnershipPass,
     status: 'hibernated'
   };
 
@@ -409,7 +540,7 @@ export function prepareSessionHibernation({
     ...(secretManifest.metadata || {}),
     name: resolvedSecretName,
     namespace: defaults.namespace,
-    ...(ownerReferences ? { ownerReferences } : {}),
+    ...(secretOwnerReferences ? { ownerReferences: secretOwnerReferences } : {}),
     labels: {
       ...(secretManifest.metadata?.labels || {}),
       'harikube.info/session': resolvedSessionId,
@@ -424,54 +555,42 @@ export function prepareSessionHibernation({
   };
   delete secretManifest.stringData;
 
-  const leaseManifests = pendingWorkers.map(worker => ({
-    apiVersion: 'coordination.k8s.io/v1',
-    kind: 'Lease',
-    metadata: {
-      name: worker.leaseName,
-      namespace: defaults.namespace,
-      ...(ownerReferences ? { ownerReferences } : {}),
-      labels: {
-        'harikube.info/session': resolvedSessionId,
-        'harikube.info/worker': String(worker.index)
-      }
-    },
-    spec: {
-      leaseDurationSeconds: defaults.leaseDurationSeconds
-    }
-  }));
+  const leaseManifests = [];
 
-  const triggerManifests = pendingWorkers.map(worker => ({
-    apiVersion: 'triggers.harikube.info/v1',
-    kind: 'PiTrigger',
-    metadata: {
-      name: worker.triggerName,
-      namespace: defaults.namespace,
-      ...(ownerReferences ? { ownerReferences } : {}),
-      labels: {
-        'harikube.info/session': resolvedSessionId,
-        'harikube.info/worker': String(worker.index)
-      },
-      annotations: {
-        'harikube.info/session-secret': resolvedSecretName,
-        'harikube.info/worker-prompt': worker.prompt,
-        'harikube.info/output-location': worker.outputLocation || ''
-      }
-    },
-    spec: {
-      resource: {
-        apiVersion: 'coordination.k8s.io/v1',
-        kind: 'Lease'
-      },
-      namespaces: [defaults.namespace],
-      fieldSelectors: [`metadata.name=${worker.leaseName}`],
-      eventFilter: 'and (not .spec.holderIdentity) (not .spec.acquireTime) (not .spec.renewTime) (not .spec.leaseTransitions)',
-      eventTypes: ['ADDED'],
-      sendInitialEvents: true,
-      maxJobs: 1,
-      agent: defaults.agent
-    }
-  }));
+  const triggerManifests = triggerOwnerReferences
+    ? pendingWorkers.map(worker => ({
+        apiVersion: 'triggers.harikube.info/v1',
+        kind: 'PiTrigger',
+        metadata: {
+          name: worker.triggerName,
+          namespace: defaults.namespace,
+          ownerReferences: triggerOwnerReferences,
+          labels: {
+            'harikube.info/session': resolvedSessionId,
+            'harikube.info/round': String(resolvedRound),
+            'harikube.info/worker': String(worker.index)
+          },
+          annotations: {
+            'harikube.info/session-secret': resolvedSecretName,
+            'harikube.info/output-location': worker.outputLocation || ''
+          }
+        },
+        spec: {
+          resource: {
+            apiVersion: 'batch/v1',
+            kind: 'Job'
+          },
+          namespaces: [defaults.namespace],
+          labelSelectors: [`${PI_TRIGGER_JOB_NAME_LABEL}=${worker.triggerName}`],
+          eventTypes: ['ADDED', 'MODIFIED'],
+          eventFilter: TERMINAL_JOB_EVENT_FILTER,
+          sendInitialEvents: true,
+          maxJobs: 1,
+          timeout: defaults.piTriggerTimeout,
+          agent: defaults.agent
+        }
+      }))
+    : [];
 
   return {
     sessionId: resolvedSessionId,
@@ -482,6 +601,8 @@ export function prepareSessionHibernation({
     workSoFar,
     nextStep: next,
     context,
+    cleanup,
+    requiresSecretOwnershipPass,
     secretManifest,
     leaseManifests,
     triggerManifests,
@@ -647,13 +768,25 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     throw new Error(`worker ${promptInfo.workerIndex} is missing from context.workers`);
   }
 
+  const cleanup =
+    context.cleanup && typeof context.cleanup === 'object'
+      ? clone(context.cleanup)
+      : buildSessionCleanup({
+          sessionId: context.id ?? promptInfo.sessionId,
+          namespace: context.namespace ?? promptInfo.namespace,
+          secretName: context.secretName ?? secret.metadata?.name ?? `pi-session-${promptInfo.sessionId}`,
+          round: Number(context.round) || promptInfo.round,
+          workers: Array.isArray(context.workers) ? context.workers : []
+        });
+
   const jobState = promptInfo.timeout ? { outcome: 'timeout', summary: 'Worker timed out.' } : inspectJob(jobJson, eventsJson);
   if (jobState.outcome === 'not-ready') {
     return {
       action: 'not-ready',
       reason: jobState.summary,
       promptInfo,
-      context
+      context,
+      cleanup
     };
   }
 
@@ -663,7 +796,8 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
       action: 'already-reported',
       reason: `Session ${promptInfo.sessionId} round ${promptInfo.round}: worker ${promptInfo.workerIndex} already reported.`,
       promptInfo,
-      context
+      context,
+      cleanup
     };
   }
 
@@ -692,12 +826,14 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
 
   const updatedContext = clone(context);
   updatedContext.status = pendingCount === 0 ? 'merging' : 'hibernated';
+  updatedContext.cleanup = cleanup;
   updatedSecret.data['context.json'] = encodeJson(updatedContext);
 
   return {
     action: pendingCount === 0 ? 'merge' : 'wait',
     promptInfo,
     context: updatedContext,
+    cleanup,
     pendingCount,
     result,
     replacementSecret: updatedSecret,

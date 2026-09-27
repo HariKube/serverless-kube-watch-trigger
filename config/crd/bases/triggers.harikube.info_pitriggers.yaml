@@ -466,6 +466,11 @@ spec:
                 default: false
                 description: SendInitialEvents represents initial object state triggers.
                 type: boolean
+              timeout:
+                description: Timeout limits the trigger watcher/session lifetime,
+                  after which the controller may cancel watchers and delete the trigger.
+                format: duration
+                type: string
             required:
             - agent
             - resource

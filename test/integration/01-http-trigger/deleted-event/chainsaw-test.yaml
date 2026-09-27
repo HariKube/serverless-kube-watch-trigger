@@ -4,7 +4,7 @@ metadata:
   name: deleted-event
 spec:
   timeouts:
-    exec: 2m
+    exec: 4m
   skipDelete: true
   namespace: deleted-event
   steps:
@@ -114,6 +114,199 @@ spec:
         duration: 5s
     - script:
         content: kubectl logs -n deleted-event -l app=nginx-deleted | grep 'Go-http-client/1.1'
+  - name: Create HTTP server
+    try:
+    - apply:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: deleted-event-echo
+            namespace: deleted-event
+            labels:
+              app: deleted-event-echo
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: deleted-event-echo
+            template:
+              metadata:
+                labels:
+                  app: deleted-event-echo
+              spec:
+                containers:
+                - name: nginx
+                  image: nginx:latest
+                  ports:
+                  - containerPort: 80
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: deleted-event-echo-service
+            namespace: deleted-event
+          spec:
+            type: NodePort
+            selector:
+              app: deleted-event-echo
+            ports:
+              - protocol: TCP
+                port: 8881
+                targetPort: 80
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: deleted-event-echo
+            namespace: deleted-event
+          status:
+            readyReplicas: 1
+  - name: Create watched ConfigMap and timeout HTTPTrigger
+    try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: watched-cm-deleted-timeout
+            namespace: deleted-event
+            labels:
+              watch-e2e-deleted-timeout: "true"
+    - apply:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: deleted-event-timeout-trigger
+            namespace: deleted-event
+            finalizers:
+              - chainsaw.test/finalizer
+          spec:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+            namespaces:
+              - deleted-event
+            labelSelectors:
+              - "watch-e2e-deleted-timeout=true"
+            eventTypes:
+              - DELETED
+            url:
+              service:
+                name: deleted-event-echo-service
+                namespace: deleted-event
+                uri:
+                  static: "/"
+            method: POST
+            timeout: "10s"
+            body:
+              template: |
+                eventType: {{ .eventType }}
+                trigger: {{ .metadata.name }}
+                message: {{ .message }}
+    - assert:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: deleted-event-timeout-trigger
+            namespace: deleted-event
+    - sleep:
+        duration: 1s
+  - name: Pause controller, wait for trigger to expire, and resume controller
+    try:
+    - script:
+        content: |
+          #!/bin/sh
+          set -e
+          found=0
+          # Prefer explicit known controller deployment
+          if kubectl get deploy -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager >/dev/null 2>&1; then
+            kubectl scale deployment -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager --replicas=0 || true
+            echo "scaled serverless-kube-watch-trigger-system/serverless-kube-watch-trigger-controller-manager to 0"
+          else
+            for ns in default kube-system harikube-system operators monitoring; do
+              for name in serverless-kube-watch-trigger-controller-manager serverless-kube-watch-trigger pitrigger-controller httptrigger-controller controller-manager; do
+                if kubectl get deploy -n $ns $name >/dev/null 2>&1; then
+                  kubectl scale deployment -n $ns $name --replicas=0 || true
+                  echo "scaled $ns/$name to 0"
+                  found=1
+                  break 2
+                fi
+              done
+            done
+            if [ "$found" -eq 0 ]; then
+              echo "no controller deployment found to scale down; proceeding"
+            fi
+          fi
+    - sleep:
+        duration: 15s
+    - script:
+        content: |
+          #!/bin/sh
+          # Prefer restoring the explicit known controller deployment
+          if kubectl get deploy -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager >/dev/null 2>&1; then
+            kubectl scale deployment -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager --replicas=1 || true
+            echo "scaled serverless-kube-watch-trigger-system/serverless-kube-watch-trigger-controller-manager to 1"
+          else
+            for ns in default kube-system harikube-system operators monitoring; do
+              for name in serverless-kube-watch-trigger-controller-manager serverless-kube-watch-trigger pitrigger-controller httptrigger-controller controller-manager; do
+                if kubectl get deploy -n $ns $name >/dev/null 2>&1; then
+                  kubectl scale deployment -n $ns $name --replicas=1 || true
+                  echo "scaled $ns/$name to 1"
+                  break 2
+                fi
+              done
+            done
+          fi
+    - sleep:
+        duration: 5s
+  - name: Wait for timeout-driven deleted callback and validate trigger expiration
+    try:
+    - script:
+        content: |
+          #!/bin/sh
+          set -e
+          for i in $(seq 1 12); do
+            logs="$(kubectl logs -n deleted-event -l app=deleted-event-echo 2>/dev/null || true)"
+            echo "$logs" | grep -q 'POST / HTTP/1.1' && exit 0
+            sleep 5
+          done
+          echo "timed out waiting for timeout-driven deleted callback"
+          exit 1
+    - script:
+        content: |
+          #!/bin/sh
+          set -e
+          for i in $(seq 1 12); do
+            ts="$(kubectl get httptrigger deleted-event-timeout-trigger -n deleted-event -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+            [ -n "$ts" ] && exit 0
+            sleep 5
+          done
+          echo "timed out waiting for deleted-event-timeout-trigger deletionTimestamp"
+          exit 1
+  - name: Remove finalizers and restore controller if needed
+    try:
+    - script:
+        content: |
+          #!/bin/sh
+          kubectl patch httptrigger deleted-event-timeout-trigger -n deleted-event --type='merge' -p '{"metadata":{"finalizers":[]}}' || true
+          # Prefer restoring the explicit known controller deployment
+          if kubectl get deploy -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager >/dev/null 2>&1; then
+            kubectl scale deployment -n serverless-kube-watch-trigger-system serverless-kube-watch-trigger-controller-manager --replicas=1 || true
+          else
+            for ns in default kube-system harikube-system operators monitoring; do
+              for name in serverless-kube-watch-trigger-controller-manager serverless-kube-watch-trigger pitrigger-controller httptrigger-controller controller-manager; do
+                if kubectl get deploy -n $ns $name >/dev/null 2>&1; then
+                  kubectl scale deployment -n $ns $name --replicas=1 || true
+                  break 2
+                fi
+              done
+            done
+          fi
   - name: Cleanup test
     try:
     - delete:
