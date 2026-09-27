@@ -76,6 +76,10 @@ type TriggerSpec struct {
 	// +kubebuilder:validation:Format=duration
 	// LockDuration enables annotation-based reconcile leasing for this trigger when set to a non-zero duration.
 	LockDuration metav1.Duration `json:"lockDuration,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// WatcherKubeconfigSecret references a Secret containing kubeconfig data used by watcher loops to connect to an alternate Kubernetes cluster when present.
+	WatcherKubeconfigSecret corev1.LocalObjectReference `json:"watcherKubeconfigSecret,omitempty"`
 }
 
 // HTTP represents HTTP based trigger details.

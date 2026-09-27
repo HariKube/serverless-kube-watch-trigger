@@ -60,6 +60,14 @@ spec:
             readyReplicas: 1
   - name: Create http trigger
     try:
+    - script:
+        content: |
+          set -euo pipefail
+          # Create a Secret in the test namespace containing the current kubeconfig
+          TMP_KUBECONFIG=$(mktemp)
+          kubectl config view --raw > "$TMP_KUBECONFIG"
+          kubectl -n simple create secret generic watcher-kubeconfig --from-file=kubeconfig="$TMP_KUBECONFIG" --dry-run=client -o yaml | kubectl apply -f -
+          rm -f "$TMP_KUBECONFIG"
     - apply:
         resource:
           apiVersion: triggers.harikube.info/v1
@@ -71,6 +79,8 @@ spec:
             resource:
               apiVersion: apps/v1
               kind: Deployment
+            watcherKubeconfigSecret:
+              name: watcher-kubeconfig
             url:
               service:
                 name: nginx-service

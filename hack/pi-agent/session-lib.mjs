@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 const NAME_RE = /^[a-z0-9.-]+$/;
 const LABEL_KEY_RE = /^[a-z0-9./-]+$/;
 const ID_RE = /^[a-z0-9-]+$/;
+const TRACE_LABEL = 'harikube.info/trace-id';
 const REQUIRED_AGENT_PATHS = [
   ['image', ['image']],
   ['configSecretRef.name', ['configSecretRef', 'name']],
@@ -60,6 +61,47 @@ function ensureNumber(value, label, { min, max } = {}) {
   return parsed;
 }
 
+function parseDurationMinutes(value, label) {
+  const source = ensureString(value, label);
+  const matcher = /([0-9]+(?:\.[0-9]+)?)(ns|us|µs|μs|ms|s|m|h)/g;
+  let totalMinutes = 0;
+  let consumed = '';
+  let match;
+  while ((match = matcher.exec(source)) !== null) {
+    const amount = Number(match[1]);
+    const unit = match[2];
+    consumed += match[0];
+    switch (unit) {
+      case 'ns':
+        totalMinutes += amount / 1e9 / 60;
+        break;
+      case 'us':
+      case 'µs':
+      case 'μs':
+        totalMinutes += amount / 1e6 / 60;
+        break;
+      case 'ms':
+        totalMinutes += amount / 1000 / 60;
+        break;
+      case 's':
+        totalMinutes += amount / 60;
+        break;
+      case 'm':
+        totalMinutes += amount;
+        break;
+      case 'h':
+        totalMinutes += amount * 60;
+        break;
+      default:
+        throw new Error(`${label} contains unsupported duration unit ${unit}`);
+    }
+  }
+  if (!consumed || consumed !== source) {
+    throw new Error(`${label} must be a valid Go-style duration like 10m, 90s, or 1h30m`);
+  }
+  return totalMinutes;
+}
+
 function ensureOneOf(value, label, allowed) {
   const normalized = ensureString(value, label);
   if (!allowed.includes(normalized)) {
@@ -72,6 +114,14 @@ function ensureName(value, label) {
   const trimmed = ensureString(value, label);
   if (!NAME_RE.test(trimmed)) {
     throw new Error(`${label} may contain only lowercase letters, digits, '-' and '.'`);
+  }
+  return trimmed;
+}
+
+function ensureTraceId(value, label) {
+  const trimmed = ensureName(value, label);
+  if (trimmed.length > 63) {
+    throw new Error(`${label} must be 63 characters or fewer`);
   }
   return trimmed;
 }
@@ -135,12 +185,6 @@ function buildSessionCleanup({ sessionId, namespace, secretName, round, workers 
             job: {
               apiVersion: 'batch/v1',
               kind: 'Job',
-              namespace,
-              labelSelector
-            },
-            inputConfigMap: {
-              apiVersion: 'v1',
-              kind: 'ConfigMap',
               namespace,
               labelSelector
             }
@@ -209,6 +253,40 @@ function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedP
     cleanedPrompt
   });
 
+  // Preserve existing runtime metadata when present and provide explicit lifecycle/outcome
+  const jobName =
+    (typeof raw.job === 'string' && raw.job.trim()) ||
+    (typeof raw.jobName === 'string' && raw.jobName.trim()) ||
+    (typeof previousWorker?.job === 'string' && previousWorker.job.trim()) ||
+    (typeof previousWorker?.jobName === 'string' && previousWorker.jobName.trim()) ||
+    undefined;
+
+  // state: one of 'pending', 'running', 'succeeded', 'failed', 'timeout'
+  let state = previousWorker?.state;
+  if (!state) {
+    if (completed) {
+      // if previous outcome is known prefer it, otherwise infer success unless result text suggests failure/timeout
+      const prevOutcome = previousWorker?.outcome;
+      if (prevOutcome) {
+        state = prevOutcome;
+      } else if (result) {
+        if (/timeout|timed out/i.test(result)) {
+          state = 'timeout';
+        } else if (/failed|error|exception/i.test(result)) {
+          state = 'failed';
+        } else {
+          state = 'succeeded';
+        }
+      } else {
+        state = 'succeeded';
+      }
+    } else {
+      state = 'pending';
+    }
+  }
+
+  const outcome = previousWorker?.outcome || (completed ? (state === 'timeout' ? 'timeout' : state === 'failed' ? 'failed' : 'succeeded') : undefined);
+
   return {
     index,
     task,
@@ -218,6 +296,10 @@ function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedP
     result,
     namespace,
     triggerName,
+    job: jobName,
+    jobName: jobName,
+    state,
+    outcome,
     prompt
   };
 }
@@ -252,6 +334,8 @@ export function normalizeSubAgentDefaults(rawDefaults, fallbackNamespace = 'defa
       : typeof agent.timeout === 'string' && agent.timeout.trim()
       ? ensureString(agent.timeout, 'subAgentDefaults.agent.timeout')
       : '24h';
+  const traceId =
+    typeof raw.traceId === 'string' && raw.traceId.trim() ? ensureTraceId(raw.traceId, 'subAgentDefaults.traceId') : undefined;
 
   return {
     ...clone(raw),
@@ -259,6 +343,7 @@ export function normalizeSubAgentDefaults(rawDefaults, fallbackNamespace = 'defa
     leaseDurationSeconds,
     maxParallel,
     piTriggerTimeout,
+    ...(traceId ? { traceId } : {}),
     agent
   };
 }
@@ -276,7 +361,8 @@ export function decideSubagentStrategy({
   estimatedSteps,
   estimatedMinutes,
   independentWorkUnits = 1,
-  maxParallel = 5
+  maxParallel = 5,
+  workerTimeout
 }) {
   const taskSummary = ensureString(task, 'task');
   const action = proposedAction === undefined ? undefined : ensureOneOf(proposedAction, 'proposedAction', ['stay-local', 'delegate']);
@@ -284,12 +370,16 @@ export function decideSubagentStrategy({
   const minutes = estimatedMinutes === undefined ? undefined : ensureNumber(estimatedMinutes, 'estimatedMinutes', { min: 0 });
   const workUnits = ensureInteger(independentWorkUnits, 'independentWorkUnits', { min: 1 });
   const parallelLimit = ensureInteger(maxParallel, 'maxParallel', { min: 1, max: 5 });
+  const timeoutMinutes = workerTimeout === undefined ? undefined : parseDurationMinutes(workerTimeout, 'workerTimeout');
 
   const checks = [];
   const warnings = [];
   const exceedsStepLimit = steps !== undefined && steps > 5;
   const exceedsMinuteLimit = minutes !== undefined && minutes > 2;
   const canSplitSafely = workUnits > 1;
+  const timeoutThresholdMinutes = timeoutMinutes === undefined ? undefined : timeoutMinutes * 0.75;
+  const exceedsTimeoutSafetyWindow =
+    minutes !== undefined && timeoutThresholdMinutes !== undefined ? minutes >= timeoutThresholdMinutes : false;
 
   if (steps === undefined) {
     warnings.push('estimatedSteps is missing; decision confidence is reduced.');
@@ -315,6 +405,18 @@ export function decideSubagentStrategy({
     });
   }
 
+  if (timeoutMinutes === undefined) {
+    warnings.push('workerTimeout is missing; timeout-safety delegation checks are reduced.');
+    checks.push({ status: 'warn', message: 'Worker timeout was not provided.' });
+  } else {
+    checks.push({
+      status: exceedsTimeoutSafetyWindow ? 'warn' : 'pass',
+      message: exceedsTimeoutSafetyWindow
+        ? `Estimated ${minutes} minutes reaches the 75% timeout safety threshold of ${timeoutThresholdMinutes} minutes for worker timeout ${workerTimeout}.`
+        : `Estimated duration stays below the 75% timeout safety threshold of ${timeoutThresholdMinutes} minutes for worker timeout ${workerTimeout}.`
+    });
+  }
+
   checks.push({
     status: canSplitSafely ? 'pass' : 'info',
     message: canSplitSafely
@@ -322,8 +424,8 @@ export function decideSubagentStrategy({
       : 'Work is a single dependent stream.'
   });
 
-  const recommendedAction = exceedsStepLimit || exceedsMinuteLimit || canSplitSafely ? 'delegate' : 'stay-local';
-  const recommendedWorkers = recommendedAction === 'delegate' ? Math.min(workUnits, parallelLimit) : 0;
+  const recommendedAction = exceedsTimeoutSafetyWindow || exceedsStepLimit || exceedsMinuteLimit || canSplitSafely ? 'delegate' : 'stay-local';
+  const recommendedWorkers = recommendedAction === 'delegate' ? Math.max(1, Math.min(workUnits, parallelLimit)) : 0;
   if (recommendedAction === 'delegate' && workUnits > parallelLimit) {
     warnings.push(`Requested ${workUnits} independent work units but maxParallel limits dispatch to ${parallelLimit}.`);
   }
@@ -348,7 +450,9 @@ export function decideSubagentStrategy({
 
   const reason =
     recommendedAction === 'delegate'
-      ? `Delegate this task because it exceeds the local-work guideline${canSplitSafely ? ' and has parallelizable work' : ''}.`
+      ? exceedsTimeoutSafetyWindow
+        ? `Delegate this task asynchronously because the estimate approaches the worker timeout safety window${canSplitSafely ? ' and it also has parallelizable work' : ''}.`
+        : `Delegate this task because it exceeds the local-work guideline${canSplitSafely ? ' and has parallelizable work' : ''}.`
       : 'Keep this task local because it is short, bounded, and single-stream.';
 
   return {
@@ -359,6 +463,9 @@ export function decideSubagentStrategy({
     recommendedWorkers,
     confidence,
     reason,
+    workerTimeout: workerTimeout === undefined ? undefined : ensureString(workerTimeout, 'workerTimeout'),
+    timeoutThresholdMinutes,
+    exceedsTimeoutSafetyWindow,
     warnings,
     checks
   };
@@ -395,12 +502,12 @@ export function createSessionId() {
 
 export function buildWorkerPrompt({ defaults, sessionId, namespace, round, worker, cleanedPrompt = '' }) {
   return [
-    buildDefaultsPrefix(defaults),
     `Session ID: ${sessionId}`,
     `Namespace: ${namespace}`,
     `Session Secret Label: harikube.info/session=${sessionId}`,
     `Round: ${round}`,
     `Worker Index: ${worker.index}`,
+    'Sub-agent defaults are available from the `pi-subagent-defaults-runtime` skill for this execution.',
     '',
     'Task:',
     worker.task,
@@ -512,6 +619,7 @@ export function prepareSessionHibernation({
     namespace: defaults.namespace,
     secretName: resolvedSecretName,
     round: resolvedRound,
+    ...(defaults.traceId ? { traceId: defaults.traceId } : {}),
     subAgentDefaults: defaults,
     originalPrompt: parentPrompt,
     cleanedPrompt: normalizedPrompt,
@@ -521,7 +629,9 @@ export function prepareSessionHibernation({
     cleanup,
     ...(resolvedOwnerReference ? { sourceOwnerReference: resolvedOwnerReference } : {}),
     requiresSecretOwnershipPass,
-    status: 'hibernated'
+    // explicit persisted pending count so wake-up can derive authoritative state
+    pendingCount: pendingWorkers.length,
+    status: pendingWorkers.length === 0 ? 'merging' : 'hibernated'
   };
 
   const secretManifest = existingSecret
@@ -545,10 +655,36 @@ export function prepareSessionHibernation({
       ...(secretManifest.metadata?.labels || {}),
       'harikube.info/session': resolvedSessionId,
       'harikube.info/round': String(resolvedRound),
-      'harikube.info/pending-subagents': String(pendingWorkers.length)
+      'harikube.info/pending-subagents': String(pendingWorkers.length),
+      ...(defaults.traceId ? { [TRACE_LABEL]: defaults.traceId } : {})
     }
   };
   secretManifest.type = secretManifest.type || 'Opaque';
+
+  // compute and persist aggregate counts so wake-up can tell completion vs failures/timeouts
+  const agg = {
+    total: Array.isArray(context.workers) ? context.workers.length : 0,
+    pending: 0,
+    running: 0,
+    succeeded: 0,
+    failed: 0,
+    timedOut: 0,
+    completed: 0
+  };
+  for (const w of context.workers || []) {
+    const s = w?.state;
+    if (s === 'running') agg.running++;
+    else if (s === 'succeeded') agg.succeeded++;
+    else if (s === 'failed') agg.failed++;
+    else if (s === 'timeout' || s === 'timedout') agg.timedOut++;
+    else agg.pending++;
+    if (w?.completed) agg.completed++;
+  }
+  context.aggregate = agg;
+  context.aggregate.allSucceeded = agg.completed > 0 && agg.failed === 0 && agg.timedOut === 0 && agg.succeeded === agg.completed;
+  context.aggregate.completedWithFailures = agg.completed > 0 && agg.failed > 0;
+  context.aggregate.completedWithTimeouts = agg.completed > 0 && agg.timedOut > 0;
+
   secretManifest.data = {
     ...(secretManifest.data || {}),
     'context.json': encodeJson(context)
@@ -568,7 +704,8 @@ export function prepareSessionHibernation({
           labels: {
             'harikube.info/session': resolvedSessionId,
             'harikube.info/round': String(resolvedRound),
-            'harikube.info/worker': String(worker.index)
+            'harikube.info/worker': String(worker.index),
+            ...(defaults.traceId ? { [TRACE_LABEL]: defaults.traceId } : {})
           },
           annotations: {
             'harikube.info/session-secret': resolvedSecretName,
@@ -748,6 +885,43 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     };
   }
   const context = readContextFromSecret(secret);
+  // Ensure stored worker records always carry explicit state and outcome fields
+  if (Array.isArray(context.workers)) {
+    context.workers = context.workers.map(w => {
+      const copy = { ...(w || {}) };
+      const completed = Boolean(copy?.completed);
+      const outcome = copy?.outcome;
+      const state = copy?.state;
+
+      // infer missing state from outcome/result/completed when possible
+      if (!state) {
+        if (completed) {
+          if (outcome) {
+            copy.state = outcome === 'timeout' ? 'timeout' : outcome === 'failed' ? 'failed' : 'succeeded';
+          } else if (typeof copy?.result === 'string') {
+            if (/timeout|timed out/i.test(copy.result)) copy.state = 'timeout';
+            else if (/failed|error|exception/i.test(copy.result)) copy.state = 'failed';
+            else copy.state = 'succeeded';
+          } else {
+            copy.state = 'succeeded';
+          }
+        } else {
+          copy.state = 'pending';
+        }
+      }
+
+      if (copy.outcome === undefined) {
+        if (completed) {
+          copy.outcome = copy.state === 'timeout' ? 'timeout' : copy.state === 'failed' ? 'failed' : copy.state === 'succeeded' ? 'succeeded' : undefined;
+        } else {
+          copy.outcome = undefined;
+        }
+      }
+
+      return copy;
+    });
+  }
+
   if (context.id !== promptInfo.sessionId || context.namespace !== promptInfo.namespace) {
     return {
       action: 'stale-round',
@@ -834,10 +1008,13 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     return Number.isInteger(idx) && !completedIndexes.has(idx);
   }).length;
 
+  // prefer stored job identity (context.workers[*].job or jobName) over prompt-derived job name
+  const jobIdentity = worker?.job || worker?.jobName || promptInfo.jobName || null;
+
   const result = {
     round: promptInfo.round,
     index: promptInfo.workerIndex,
-    job: promptInfo.jobName ?? null,
+    job: jobIdentity,
     outcome: jobState.outcome,
     summary: (workerSummary || jobState.summary || jobState.outcome).trim()
   };
@@ -862,19 +1039,61 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     ? updatedContext.workers.map(w => {
         const idx = Number(w?.index);
         if (Number.isInteger(idx) && idx === promptInfo.workerIndex) {
-          return {
+          const updated = {
             ...w,
             completed: true,
-            result: (result.summary || '').trim()
+            result: (result.summary || '').trim(),
+            state: jobState.outcome === 'timeout' ? 'timeout' : jobState.outcome === 'succeeded' ? 'succeeded' : jobState.outcome,
+            outcome: jobState.outcome,
+            job: jobIdentity,
+            jobName: jobIdentity
           };
+          return updated;
         }
         return w;
       })
     : updatedContext.workers;
 
+  // recompute aggregate counts and session status
+  const agg = {
+    total: Array.isArray(updatedContext.workers) ? updatedContext.workers.length : 0,
+    pending: 0,
+    running: 0,
+    succeeded: 0,
+    failed: 0,
+    timedOut: 0,
+    completed: 0
+  };
+  for (const w of updatedContext.workers || []) {
+    const s = w?.state;
+    if (s === 'running') agg.running++;
+    else if (s === 'succeeded') agg.succeeded++;
+    else if (s === 'failed') agg.failed++;
+    else if (s === 'timeout' || s === 'timedout') agg.timedOut++;
+    else agg.pending++;
+    if (w?.completed) agg.completed++;
+  }
+  updatedContext.aggregate = agg;
+  updatedContext.aggregate.allSucceeded = agg.completed > 0 && agg.failed === 0 && agg.timedOut === 0 && agg.succeeded === agg.completed;
+  updatedContext.aggregate.completedWithFailures = agg.completed > 0 && agg.failed > 0;
+  updatedContext.aggregate.completedWithTimeouts = agg.completed > 0 && agg.timedOut > 0;
+
   updatedContext.status = pendingCount === 0 ? 'merging' : 'hibernated';
   updatedContext.cleanup = cleanup;
   updatedSecret.data['context.json'] = encodeJson(updatedContext);
+
+  // compute a top-level aggregate outcome when we're merging so callers can distinguish
+  // an overall completed-with-failures/timeouts state from a single-worker failure
+  const summaryCounts = { succeeded: agg.succeeded, failed: agg.failed, timeout: agg.timedOut };
+  if (pendingCount === 0) {
+    if (updatedContext.aggregate.completedWithFailures) {
+      result.outcome = 'completed-with-failures';
+    } else if (updatedContext.aggregate.completedWithTimeouts) {
+      result.outcome = 'completed-with-timeouts';
+    } else if (updatedContext.aggregate.allSucceeded) {
+      result.outcome = 'succeeded';
+    }
+  }
 
   return {
     action: pendingCount === 0 ? 'merge' : 'wait',
@@ -883,12 +1102,13 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     cleanup,
     pendingCount,
     result,
+    summaryCounts,
     replacementSecret: updatedSecret,
     replacementSecretJson: JSON.stringify(updatedSecret, null, 2),
     exitReason:
       pendingCount === 0
         ? `Session ${promptInfo.sessionId} round ${promptInfo.round}: merging results from ${Array.isArray(context.workers) ? context.workers.length : 0} workers`
-        : `Session ${promptInfo.sessionId} round ${promptInfo.round}: worker ${promptInfo.workerIndex} recorded, ${pendingCount} pending`
+        : `Session ${promptInfo.sessionId} round ${promptInfo.workerIndex} recorded, ${pendingCount} pending`
   };
 }
 

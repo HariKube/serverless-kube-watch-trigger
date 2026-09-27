@@ -21,6 +21,8 @@ spec:
   concurrency: 2
   maxJobs: 4
   sendInitialEvents: false
+  watcherKubeconfigSecret:
+    name: watcher-kubeconfig # Optional: Secret name containing kubeconfig (data key: "kubeconfig"); points watcher at an alternate cluster and falls back to the local cluster when omitted.
   timeout: 30m # Watcher/session timeout for the trigger itself.
   lockDuration: 45s # Separate reconcile-lock duration.
 

@@ -6,7 +6,7 @@ export default function registerProcessSessionWakeup(pi) {
     name: 'process_session_wakeup',
     label: 'process_session_wakeup',
     description:
-      'Validate wake-up metadata, inspect stored session state, and produce the Secret replacement needed to record a worker result.',
+      'Low-level wake-up helper: validate wake-up metadata, inspect stored session state, and produce the Secret replacement needed to record a worker result.',
     parameters: Type.Object({
       prompt: Type.String({ description: 'The current prompt, including wake-up lines when present.' }),
       secretJson: Type.String({ description: 'JSON from kubectl get secret ... -o json, list response, or NotFound Status payload.' }),

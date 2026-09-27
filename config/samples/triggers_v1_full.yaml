@@ -23,6 +23,10 @@ spec:
   concurrency: 5
   sendInitialEvents: false
   lockDuration: 45s
+  # Optional Secret containing a kubeconfig to run watcher loops against an alternate cluster;
+  # omit to use the local cluster's in-cluster config.
+  watcherKubeconfigSecret:
+    name: remote-watcher-kubeconfig # Secret must contain the 'kubeconfig' key
   url:
     static: "https://example.com/hook"
     # template: "https://example.com/hook/{{ .metadata.name }}"

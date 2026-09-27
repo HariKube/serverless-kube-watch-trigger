@@ -7,6 +7,8 @@ spec:
   resource:
     apiVersion: apps/v1
     kind: Deployment
+  # watcherKubeconfigSecret:
+  #   name: remote-cluster-kubeconfig  # optional; omit to use the default local-cluster watcher
   url:
     # static: "https://example.com/hook"
     static: "http://192.168.3.104:8000"

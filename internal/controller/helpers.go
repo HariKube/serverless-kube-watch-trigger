@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -25,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,6 +38,8 @@ import (
 )
 
 const trueString = "true"
+
+const kubeconfigKey = "kubeconfig"
 
 const (
 	filterTemplateName = "filter_template"
@@ -116,19 +123,19 @@ func addCompiledTemplate(compiledTemplates map[string]*template.Template, name s
 	return nil
 }
 
-func compileSharedTemplates(compiledTemplates map[string]*template.Template, eventFilter string, url triggersv1.URL, headers triggersv1.Headers) error {
+func compileSharedTemplates(compiledTemplates map[string]*template.Template, eventFilter string, urlSpec triggersv1.URL, headers triggersv1.Headers) error {
 	if eventFilter != "" {
 		if err := addCompiledTemplate(compiledTemplates, filterTemplateName, fmt.Sprintf("{{if %s}}true{{end}}", eventFilter), nil); err != nil {
 			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse filter template"))
 		}
 	}
-	if url.Template != nil {
-		if err := addCompiledTemplate(compiledTemplates, urlTemplateName, *url.Template, nil); err != nil {
+	if urlSpec.Template != nil {
+		if err := addCompiledTemplate(compiledTemplates, urlTemplateName, *urlSpec.Template, nil); err != nil {
 			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse url template"))
 		}
 	}
-	if url.Service != nil && url.Service.URI.Template != nil {
-		if err := addCompiledTemplate(compiledTemplates, uriTemplateName, *url.Service.URI.Template, nil); err != nil {
+	if urlSpec.Service != nil && urlSpec.Service.URI.Template != nil {
+		if err := addCompiledTemplate(compiledTemplates, uriTemplateName, *urlSpec.Service.URI.Template, nil); err != nil {
 			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse uri template"))
 		}
 	}
@@ -155,6 +162,73 @@ func loadSecretString(ctx context.Context, getter kubeGetter, namespace string, 
 		return "", err
 	}
 	return string(value), nil
+}
+
+// getWatcherResourceClient returns a NamespaceableResourceInterface to be used by
+// watcher loops for the requested resource GVR. If watcherSecret.Name is empty
+// the provided localClient is returned; otherwise the function loads the
+// kubeconfig bytes from the named Secret (data key "kubeconfig"), builds a
+// dynamic client using that kubeconfig, and returns the resource client for gvr.
+func getWatcherResourceClient(ctx context.Context, getter kubeGetter, namespace string, localClient dynamic.NamespaceableResourceInterface, watcherSecret corev1.LocalObjectReference, gvr schema.GroupVersionResource) (dynamic.NamespaceableResourceInterface, error) {
+	if watcherSecret.Name == "" {
+		return localClient, nil
+	}
+
+	kubeconfig, err := loadSecretBytes(ctx, getter, namespace, corev1.SecretKeySelector{LocalObjectReference: watcherSecret, Key: kubeconfigKey})
+	if err != nil {
+		return nil, err
+	}
+	if len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("secret %s missing %q data", watcherSecret.Name, kubeconfigKey)
+	}
+
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	normalizeLoopbackRESTConfigForInCluster(cfg)
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return dyn.Resource(gvr), nil
+}
+func normalizeLoopbackRESTConfigForInCluster(cfg *rest.Config) {
+	if cfg == nil || cfg.Host == "" {
+		return
+	}
+
+	hostURL, err := url.Parse(cfg.Host)
+	if err != nil {
+		return
+	}
+
+	hostname := hostURL.Hostname()
+	if hostname == "" {
+		return
+	}
+	if hostname != "localhost" {
+		ip := net.ParseIP(hostname)
+		if ip == nil || !ip.IsLoopback() {
+			return
+		}
+	}
+
+	serviceHost := os.Getenv("KUBERNETES_SERVICE_HOST")
+	if serviceHost == "" {
+		return
+	}
+	servicePort := os.Getenv("KUBERNETES_SERVICE_PORT")
+	if servicePort == "" {
+		servicePort = "443"
+	}
+
+	hostURL.Host = net.JoinHostPort(serviceHost, servicePort)
+	cfg.Host = hostURL.String()
+	if cfg.ServerName == "" {
+		cfg.ServerName = "kubernetes.default.svc"
+	}
 }
 
 func loadHeaderSecrets(ctx context.Context, getter kubeGetter, namespace string, refs map[string]corev1.SecretKeySelector) (map[string]string, error) {
@@ -345,18 +419,18 @@ func renderTemplateToString(compiledTemplates map[string]*template.Template, nam
 	return rendered.String(), nil
 }
 
-func buildTriggerURL(url triggersv1.URL, compiledTemplates map[string]*template.Template, object map[string]any, serviceScheme string, servicePort int32) (string, error) {
+func buildTriggerURL(urlSpec triggersv1.URL, compiledTemplates map[string]*template.Template, object map[string]any, serviceScheme string, servicePort int32) (string, error) {
 	switch {
-	case url.Static != nil:
-		return *url.Static, nil
-	case url.Template != nil:
+	case urlSpec.Static != nil:
+		return *urlSpec.Static, nil
+	case urlSpec.Template != nil:
 		return renderTemplateToString(compiledTemplates, urlTemplateName, object)
-	case url.Service != nil:
+	case urlSpec.Service != nil:
 		var uri string
 		switch {
-		case url.Service.URI.Static != nil:
-			uri = *url.Service.URI.Static
-		case url.Service.URI.Template != nil:
+		case urlSpec.Service.URI.Static != nil:
+			uri = *urlSpec.Service.URI.Static
+		case urlSpec.Service.URI.Template != nil:
 			renderedURI, err := renderTemplateToString(compiledTemplates, uriTemplateName, object)
 			if err != nil {
 				return "", err
@@ -368,8 +442,8 @@ func buildTriggerURL(url triggersv1.URL, compiledTemplates map[string]*template.
 
 		return fmt.Sprintf("%s://%s.%s:%d/%s",
 			serviceScheme,
-			url.Service.Name,
-			url.Service.Namespace,
+			urlSpec.Service.Name,
+			urlSpec.Service.Namespace,
 			servicePort,
 			strings.TrimPrefix(uri, "/"),
 		), nil
@@ -398,7 +472,7 @@ func buildTriggerHeaders(contentType string, headers triggersv1.Headers, headerS
 	return renderedHeaders, nil
 }
 
-func emitTriggerCallFailureEvent(recorder record.EventRecorder, trigger client.Object, triggerRefName, method, url string, eventType watch.EventType, metadata map[string]interface{}, err error) {
+func emitTriggerCallFailureEvent(recorder record.EventRecorder, trigger client.Object, triggerRefName, method, callURL string, eventType watch.EventType, metadata map[string]interface{}, err error) {
 	if recorder == nil {
 		return
 	}
@@ -410,7 +484,7 @@ func emitTriggerCallFailureEvent(recorder record.EventRecorder, trigger client.O
 		"Trigger call failed for %s: method=%s url=%s eventType=%s object=%s/%s resourceVersion=%s error=%q",
 		triggerRefName,
 		method,
-		url,
+		callURL,
 		eventType,
 		fmt.Sprint(metadata["namespace"]),
 		fmt.Sprint(metadata["name"]),

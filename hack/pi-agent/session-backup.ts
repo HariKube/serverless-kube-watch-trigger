@@ -1,5 +1,5 @@
 import { Type } from 'typebox';
-import { prepareSessionHibernation } from './session-lib.mjs';
+import { hibernateSession } from './orchestration.mjs';
 
 const Worker = Type.Object({
   index: Type.Number({ description: '1-based worker index' }),
@@ -17,15 +17,17 @@ const OwnerReference = Type.Object({
   uid: Type.String({ description: 'UID of the original triggering resource.' })
 });
 
-export default function registerPrepareSessionHibernation(pi) {
+export default function registerSessionBackup(pi) {
   pi.registerTool({
-    name: 'prepare_session_hibernation',
-    label: 'prepare_session_hibernation',
+    name: 'hibernate_session',
+    label: 'hibernate_session',
     description:
-      'Low-level hibernation helper: normalize session state, generate Secret/PiTrigger manifests, and prepare worker prompts for debugging or advanced orchestration flows.',
+      'Resolve defaults, prepare parent-session hibernation state, write the session Secret, and create any delegated worker PiTriggers.',
     parameters: Type.Object({
-      subAgentDefaults: Type.Any({ description: 'Decoded sub-agent defaults object.' }),
-      originalPrompt: Type.String({ description: 'The original parent task prompt.' }),
+      prompt: Type.Optional(Type.String({ description: 'Original prompt, only needed for legacy defaults-prefix cleanup.' })),
+      fallbackNamespace: Type.Optional(Type.String()),
+      subAgentDefaults: Type.Optional(Type.Any({ description: 'Decoded sub-agent defaults object.' })),
+      originalPrompt: Type.Optional(Type.String({ description: 'The original parent task prompt.' })),
       cleanedPrompt: Type.Optional(Type.String()),
       workSoFar: Type.Optional(Type.String()),
       nextStep: Type.String({ description: 'What the parent should do after workers report back.' }),
@@ -34,13 +36,10 @@ export default function registerPrepareSessionHibernation(pi) {
       secretName: Type.Optional(Type.String()),
       round: Type.Optional(Type.Number()),
       previousContext: Type.Optional(Type.Any()),
-      existingSecretJson: Type.Optional(
-        Type.String({ description: 'Existing Secret JSON from kubectl get secret ... -o json when updating an existing session Secret.' })
-      ),
       sourceOwnerReference: Type.Optional(OwnerReference)
     }),
     async execute(_toolCallId, params) {
-      const result = prepareSessionHibernation(params);
+      const result = await hibernateSession(params);
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         details: result

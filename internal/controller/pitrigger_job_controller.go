@@ -28,7 +28,6 @@ type PiTriggerJobReconciler struct {
 
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=delete;get
 
 func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	recordReconcileStart(metricControllerPiTriggerJob)
@@ -82,20 +81,6 @@ func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					return ctrl.Result{}, nil
 				}
 				logger.Error(err, "Trigger status update failed")
-				return ctrl.Result{}, err
-			}
-		}
-	}
-
-	if terminal {
-		if configMapName := job.Annotations[piTriggerInputConfigMapAnnotation]; configMapName != "" {
-			cm := &corev1.ConfigMap{}
-			err := r.Get(ctx, client.ObjectKey{Namespace: job.Namespace, Name: configMapName}, cm)
-			if err == nil {
-				if delErr := r.Delete(ctx, cm); delErr != nil && !apierrors.IsNotFound(delErr) {
-					return ctrl.Result{}, delErr
-				}
-			} else if !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, err
 			}
 		}

@@ -17,7 +17,10 @@ export default function registerDecisionMaker(pi) {
       independentWorkUnits: Type.Optional(
         Type.Number({ description: 'How many independent work streams can proceed in parallel.' })
       ),
-      maxParallel: Type.Optional(Type.Number({ description: 'Maximum number of sub-agents allowed for the session.' }))
+      maxParallel: Type.Optional(Type.Number({ description: 'Maximum number of sub-agents allowed for the session.' })),
+      workerTimeout: Type.Optional(
+        Type.String({ description: 'PiAgentSpec.timeout duration (for example 10m or 1h30m) used for timeout-safety delegation decisions.' })
+      )
     }),
     async execute(_toolCallId, params) {
       const result = decideSubagentStrategy(params);

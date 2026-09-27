@@ -104,27 +104,18 @@ spec:
               continue
             fi
 
-            INPUT_CONFIGMAP="$(kubectl get job ${JOB_NAME} -n ${NS} -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/input-configmap}' 2>/dev/null || true)"
+            INPUT_B64="$(kubectl get job ${JOB_NAME} -n ${NS} -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PI_TRIGGER_INPUT_BASE64")].value}' 2>/dev/null || true)"
             RESOURCE_VERSION="$(kubectl get job ${JOB_NAME} -n ${NS} -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/resource-version}' 2>/dev/null || true)"
-            EVENT_JSON="$(kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o go-template='{{index .data "event.json"}}' 2>/dev/null || true)"
-            METADATA_JSON="$(kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o go-template='{{index .data "metadata.json"}}' 2>/dev/null || true)"
+            INPUT_JSON="$(printf '%s' "${INPUT_B64}" | base64 -d 2>/dev/null || true)"
 
-            if [ -n "${INPUT_CONFIGMAP}" ] && [ -n "${RESOURCE_VERSION}" ] \
-              && printf '%s' "${EVENT_JSON}" | grep -q '"eventType": "DELETED"' \
-              && printf '%s' "${EVENT_JSON}" | grep -q 'trigger session timed out' \
-              && printf '%s' "${EVENT_JSON}" | grep -q "trigger=${NS}/${TRIGGER_NAME}" \
-              && printf '%s' "${EVENT_JSON}" | grep -q "job=${JOB_NAME}" \
-              && printf '%s' "${EVENT_JSON}" | grep -q "inputConfigMap=${INPUT_CONFIGMAP}" \
-              && printf '%s' "${EVENT_JSON}" | grep -q "resourceVersion=${RESOURCE_VERSION}" \
-              && printf '%s' "${METADATA_JSON}" | grep -q '"eventType": "DELETED"' \
-              && printf '%s' "${METADATA_JSON}" | grep -q 'trigger session timed out' \
-              && printf '%s' "${METADATA_JSON}" | grep -q "trigger=${NS}/${TRIGGER_NAME}" \
-              && printf '%s' "${METADATA_JSON}" | grep -q "job=${JOB_NAME}" \
-              && printf '%s' "${METADATA_JSON}" | grep -q "inputConfigMap=${INPUT_CONFIGMAP}" \
-              && printf '%s' "${METADATA_JSON}" | grep -q "resourceVersion=${RESOURCE_VERSION}"; then
+            if [ -n "${INPUT_B64}" ] && [ -n "${RESOURCE_VERSION}" ] \
+              && printf '%s' "${INPUT_JSON}" | grep -q '"eventType":"DELETED"' \
+              && printf '%s' "${INPUT_JSON}" | grep -q 'trigger session timed out' \
+              && printf '%s' "${INPUT_JSON}" | grep -q "trigger=${NS}/${TRIGGER_NAME}" \
+              && printf '%s' "${INPUT_JSON}" | grep -q "job=${JOB_NAME}" \
+              && printf '%s' "${INPUT_JSON}" | grep -q "resourceVersion=${RESOURCE_VERSION}"; then
               kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o yaml
               kubectl get job ${JOB_NAME} -n ${NS} -o yaml
-              kubectl get configmap ${INPUT_CONFIGMAP} -n ${NS} -o yaml
               exit 0
             fi
 

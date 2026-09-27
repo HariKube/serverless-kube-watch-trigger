@@ -61,21 +61,21 @@ import (
 const (
 	piTriggerManagedLabel              = "triggers.harikube.info/pitrigger-job"
 	piTriggerTriggerNameLabel          = "triggers.harikube.info/pitrigger-name"
-	piTriggerInputConfigMapAnnotation  = "triggers.harikube.info/input-configmap"
 	piTriggerEventTypeAnnotation       = "triggers.harikube.info/event-type"
 	piTriggerResourceVersionAnnotation = "triggers.harikube.info/resource-version"
 	piTriggerSessionLabel              = "harikube.info/session"
 	piTriggerRoundLabel                = "harikube.info/round"
 	piTriggerWorkerLabel               = "harikube.info/worker"
+	piTriggerTraceIDLabel              = "harikube.info/trace-id"
 	piTriggerSessionSecretAnnotation   = "harikube.info/session-secret"
+	piTriggerOutputLocationAnnotation  = "harikube.info/output-location"
 	piTriggerWorkerContainerName       = "pi-agent"
-	piTriggerInputVolumeName           = "pi-trigger-input"
+	piTriggerWorkerInputEnvVar         = "PI_TRIGGER_INPUT_BASE64"
+	piTriggerSubAgentDefaultsEnvVar    = "PI_SUBAGENT_DEFAULTS_BASE64"
+	piTriggerRuntimeExtensionPath      = "/root/.pi/agent/extensions/pitrigger-input.ts"
 	piTriggerAgentSecretVolumeName     = "pi-agent-config"
 	piTriggerPromptsVolumeName         = "pi-agent-prompts"
 	piTriggerSkillsVolumeName          = "pi-agent-skills"
-	piTriggerInputMountPath            = "/var/run/pi-trigger"
-	piTriggerEventFilePath             = piTriggerInputMountPath + "/event.json"
-	piTriggerMetadataFilePath          = piTriggerInputMountPath + "/metadata.json"
 	piTriggerWorkerHomeDir             = "/tmp/pi-home"
 	piTriggerAgentConfigMountPath      = piTriggerWorkerHomeDir + "/.pi/agent"
 	piTriggerAgentPromptsMountPath     = piTriggerAgentConfigMountPath + "/prompts"
@@ -106,6 +106,25 @@ type piTriggerJobMetadata struct {
 	ResourceVersion   string `json:"resourceVersion"`
 	Message           string `json:"message,omitempty"`
 	TimedOutLeaseName string `json:"timedOutLeaseName,omitempty"`
+
+	// Structured session/job identity useful for wake-up and restore
+	SessionID         string `json:"sessionId,omitempty"`
+	Round             string `json:"round,omitempty"`
+	WorkerIndex       string `json:"workerIndex,omitempty"`
+	TraceID           string `json:"traceId,omitempty"`
+	SessionSecretName string `json:"sessionSecretName,omitempty"`
+	JobName           string `json:"jobName,omitempty"`
+}
+
+type piTriggerRuntimeInput struct {
+	Event    piTriggerEventInput  `json:"event"`
+	Metadata piTriggerJobMetadata `json:"metadata"`
+}
+
+type piTriggerSubAgentDefaults struct {
+	Namespace string                 `json:"namespace"`
+	TraceID   string                 `json:"traceId,omitempty"`
+	Agent     triggersv1.PiAgentSpec `json:"agent"`
 }
 
 type piTriggerSession struct {
@@ -396,7 +415,10 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	}
 
 	concurrency := normalizeConcurrency(trigger.Spec.Concurrency)
-	resourceClient := r.DynamicClient.Resource(gvr)
+	resourceClient, err := getWatcherResourceClient(depFetchCtx, r, trigger.Namespace, r.DynamicClient.Resource(gvr), trigger.Spec.WatcherKubeconfigSecret, gvr)
+	if err != nil {
+		return err
+	}
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
 	deliveryGate := r.get(triggerRefName)
 	jobCounter := sharedPiTriggerJobCounterRegistry.get(triggerRefName)
@@ -900,13 +922,71 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 			objectNamespace = namespace
 		}
 	}
-	// For session wakeups we want stable one-shot resource names per session identity
-	// so repeated terminal events for the same session produce the same Job/ConfigMap names
-	// (and thus are deduplicated). Non-session dispatches remain resourceVersion-sensitive.
+
+	// Session identity and fallback parsing
+	sessionID, round, workerIndex := derivePiTriggerSessionIdentity(trigger)
+
+	// capture restore-relevant annotations from the trigger
+	sessionSecretName := strings.TrimSpace(trigger.GetAnnotations()[piTriggerSessionSecretAnnotation])
+	outputLocation := strings.TrimSpace(trigger.GetAnnotations()[piTriggerOutputLocationAnnotation])
+	traceID := buildPiTriggerTraceID(trigger, eventPayload)
+
+	var nameHash string
+	if sessionID != "" && round != "" && workerIndex != "" {
+		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, sessionID, round, workerIndex}, "|"))
+	} else {
+		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, rv}, "|"))
+	}
+	jobName := buildPiTriggerResourceName(trigger.Name, nameHash, "job")
+	if eventPayload.Message != "" {
+		eventPayload.Message = buildPiTriggerTimeoutMessage(eventPayload.Message, triggerRefName, rv, jobName)
+	}
+	if metadataPayload.Message != "" {
+		metadataPayload.Message = buildPiTriggerTimeoutMessage(metadataPayload.Message, triggerRefName, rv, jobName)
+	}
+
+	// enrich metadata with structured session/job identity for restore
+	metadataPayload.SessionID = sessionID
+	metadataPayload.Round = round
+	metadataPayload.WorkerIndex = workerIndex
+	metadataPayload.TraceID = traceID
+	metadataPayload.SessionSecretName = sessionSecretName
+	metadataPayload.JobName = jobName
+
+	inputBase64, err := buildPiTriggerRuntimeInputEnvValue(eventPayload, metadataPayload)
+	if err != nil {
+		return "", "", err
+	}
+	subAgentDefaultsBase64, err := buildPiTriggerSubAgentDefaultsEnvValue(trigger.Namespace, traceID, trigger.Spec.Agent)
+	if err != nil {
+		return "", "", err
+	}
+
+	// build prompt (no error path)
+	workerPrompt := buildRecoverablePiTriggerWorkerPrompt(trigger, jobName, extraPromptSections...)
+	workerArgs := buildPiTriggerWorkerArgs(workerPrompt, trigger.Spec.Agent)
+	activeDeadlineSeconds := resolvePiTriggerActiveDeadlineSeconds(trigger.Spec.Agent)
+	ttlSecondsAfterFinished := resolvePiTriggerTTLSecondsAfterFinished(trigger.Spec.Agent)
+
+	jobLabels, podLabels, jobAnnotations := buildPiWorkerLabelsAndAnnotations(trigger, traceID, sessionID, round, workerIndex, eventPayload.EventType, rv, sessionSecretName, outputLocation)
+
+	job := assemblePiWorkerJob(trigger, jobName, jobLabels, podLabels, jobAnnotations, workerArgs, buildPiTriggerWorkerEnv(trigger.Spec.Agent.Env, inputBase64, subAgentDefaultsBase64), activeDeadlineSeconds, ttlSecondsAfterFinished)
+
+	if err := r.setPiTriggerChildOwnerReference(ctx, trigger, job); err != nil {
+		return "", "", err
+	}
+	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+		return "", "", err
+	}
+
+	return jobName, rv, nil
+}
+
+// derivePiTriggerSessionIdentity extracts session identity labels with fallback to parsing the trigger name
+func derivePiTriggerSessionIdentity(trigger *triggersv1.PiTrigger) (string, string, string) {
 	sessionID := strings.TrimSpace(trigger.GetLabels()[piTriggerSessionLabel])
 	round := strings.TrimSpace(trigger.GetLabels()[piTriggerRoundLabel])
 	workerIndex := strings.TrimSpace(trigger.GetLabels()[piTriggerWorkerLabel])
-	// If labels are missing, try parsing legacy or current session-style trigger name
 	if sessionID == "" || round == "" || workerIndex == "" {
 		if dsid, dr, dw, ok := parsePiTriggerSessionIdentity(trigger.Name); ok {
 			if sessionID == "" {
@@ -920,73 +1000,60 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 			}
 		}
 	}
-	var nameHash string
-	if sessionID != "" && round != "" && workerIndex != "" {
-		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, sessionID, round, workerIndex}, "|"))
-	} else {
-		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, rv}, "|"))
-	}
-	jobName := buildPiTriggerResourceName(trigger.Name, nameHash, "job")
-	configMapName := buildPiTriggerResourceName(trigger.Name, nameHash, "input")
-	if eventPayload.Message != "" {
-		eventPayload.Message = buildPiTriggerTimeoutMessage(eventPayload.Message, triggerRefName, rv, jobName, configMapName)
-	}
-	if metadataPayload.Message != "" {
-		metadataPayload.Message = buildPiTriggerTimeoutMessage(metadataPayload.Message, triggerRefName, rv, jobName, configMapName)
-	}
+	return sessionID, round, workerIndex
+}
 
-	eventBytes, err := json.MarshalIndent(eventPayload, "", "  ")
-	if err != nil {
-		return "", "", err
+// buildPiWorkerLabelsAndAnnotations returns job labels, pod labels and job annotations
+func buildPiWorkerLabelsAndAnnotations(trigger *triggersv1.PiTrigger, traceID, sessionID, round, workerIndex, eventType, rv, sessionSecretName, outputLocation string) (map[string]string, map[string]string, map[string]string) {
+	jobLabels := map[string]string{
+		piTriggerManagedLabel:     "true",
+		piTriggerTriggerNameLabel: trigger.Name,
+		piTriggerTraceIDLabel:     traceID,
 	}
-	metadataBytes, err := json.MarshalIndent(metadataPayload, "", "  ")
-	if err != nil {
-		return "", "", err
+	if sessionID != "" {
+		jobLabels[piTriggerSessionLabel] = sessionID
 	}
+	if round != "" {
+		jobLabels[piTriggerRoundLabel] = round
+	}
+	if workerIndex != "" {
+		jobLabels[piTriggerWorkerLabel] = workerIndex
+	}
+	jobAnnotations := map[string]string{
+		piTriggerEventTypeAnnotation:       eventType,
+		piTriggerResourceVersionAnnotation: rv,
+	}
+	if sessionSecretName != "" {
+		jobAnnotations[piTriggerSessionSecretAnnotation] = sessionSecretName
+	}
+	if outputLocation != "" {
+		jobAnnotations[piTriggerOutputLocationAnnotation] = outputLocation
+	}
+	podLabels := map[string]string{
+		piTriggerManagedLabel:     "true",
+		piTriggerTriggerNameLabel: trigger.Name,
+		piTriggerTraceIDLabel:     traceID,
+	}
+	if sessionID != "" {
+		podLabels[piTriggerSessionLabel] = sessionID
+	}
+	if round != "" {
+		podLabels[piTriggerRoundLabel] = round
+	}
+	if workerIndex != "" {
+		podLabels[piTriggerWorkerLabel] = workerIndex
+	}
+	return jobLabels, podLabels, jobAnnotations
+}
 
-	configMap := &corev1.ConfigMap{
+// assemblePiWorkerJob constructs the Job object from pieces
+func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabels, podLabels, jobAnnotations map[string]string, workerArgs []string, env []corev1.EnvVar, activeDeadlineSeconds *int64, ttlSecondsAfterFinished *int32) *batchv1.Job {
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      configMapName,
-			Namespace: trigger.Namespace,
-			Labels: map[string]string{
-				piTriggerManagedLabel:     "true",
-				piTriggerTriggerNameLabel: trigger.Name,
-			},
-		},
-		Data: map[string]string{
-			"event.json":    string(eventBytes),
-			"metadata.json": string(metadataBytes),
-		},
-	}
-	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
-	if err := r.setPiTriggerInputOwnerReference(ctx, trigger, configMap); err != nil {
-		return "", "", err
-	}
-	if err := r.Create(ctx, configMap); err != nil && !apierrors.IsAlreadyExists(err) {
-		return "", "", err
-	}
-
-	workerPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, jobName, extraPromptSections...)
-	if err != nil {
-		return "", "", err
-	}
-	workerArgs := buildPiTriggerWorkerArgs(workerPrompt, trigger.Spec.Agent)
-	activeDeadlineSeconds := resolvePiTriggerActiveDeadlineSeconds(trigger.Spec.Agent)
-	ttlSecondsAfterFinished := resolvePiTriggerTTLSecondsAfterFinished(trigger.Spec.Agent)
-
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: trigger.Namespace,
-			Labels: map[string]string{
-				piTriggerManagedLabel:     "true",
-				piTriggerTriggerNameLabel: trigger.Name,
-			},
-			Annotations: map[string]string{
-				piTriggerInputConfigMapAnnotation:  configMapName,
-				piTriggerEventTypeAnnotation:       eventPayload.EventType,
-				piTriggerResourceVersionAnnotation: rv,
-			},
+			Name:        jobName,
+			Namespace:   trigger.Namespace,
+			Labels:      jobLabels,
+			Annotations: jobAnnotations,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            trigger.Spec.Agent.BackoffLimit,
@@ -994,20 +1061,12 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 			TTLSecondsAfterFinished: ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						piTriggerManagedLabel:     "true",
-						piTriggerTriggerNameLabel: trigger.Name,
-					},
+					Labels: podLabels,
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: trigger.Spec.Agent.ServiceAccountName,
 					Volumes: []corev1.Volume{{
-						Name: piTriggerInputVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configMapName}},
-						},
-					}, {
 						Name: piTriggerAgentSecretVolumeName,
 						VolumeSource: corev1.VolumeSource{
 							Secret: &corev1.SecretVolumeSource{SecretName: trigger.Spec.Agent.ConfigSecretRef.Name},
@@ -1029,17 +1088,10 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 						ImagePullPolicy: trigger.Spec.Agent.ImagePullPolicy,
 						WorkingDir:      trigger.Spec.Agent.WorkingDir,
 						Args:            workerArgs,
-						Env: append([]corev1.EnvVar{{
-							Name:  "HOME",
-							Value: piTriggerWorkerHomeDir,
-						}}, trigger.Spec.Agent.Env...),
-						EnvFrom:   trigger.Spec.Agent.EnvFrom,
-						Resources: trigger.Spec.Agent.Resources,
+						Env:             env,
+						EnvFrom:         trigger.Spec.Agent.EnvFrom,
+						Resources:       trigger.Spec.Agent.Resources,
 						VolumeMounts: []corev1.VolumeMount{{
-							Name:      piTriggerInputVolumeName,
-							MountPath: piTriggerInputMountPath,
-							ReadOnly:  true,
-						}, {
 							Name:      piTriggerAgentSecretVolumeName,
 							MountPath: piTriggerAgentConfigMountPath,
 							ReadOnly:  true,
@@ -1057,38 +1109,28 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 			},
 		},
 	}
-	if !persistAfterTriggerDeletion {
-		if err := controllerutil.SetControllerReference(trigger, job, r.Scheme); err != nil {
-			return "", "", err
-		}
-	}
-	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-		return "", "", err
-	}
-
-	return jobName, rv, nil
 }
 
-func (r *PiTriggerReconciler) setPiTriggerInputOwnerReference(ctx context.Context, trigger *triggersv1.PiTrigger, configMap *corev1.ConfigMap) error {
-	if trigger == nil || configMap == nil {
+func (r *PiTriggerReconciler) setPiTriggerChildOwnerReference(ctx context.Context, trigger *triggersv1.PiTrigger, child client.Object) error {
+	if trigger == nil || child == nil {
 		return nil
-	}
-
-	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
-	if !persistAfterTriggerDeletion {
-		return controllerutil.SetControllerReference(trigger, configMap, r.Scheme)
 	}
 
 	sessionSecretName := strings.TrimSpace(trigger.GetAnnotations()[piTriggerSessionSecretAnnotation])
-	if sessionSecretName == "" {
+	if sessionSecretName != "" {
+		sessionSecret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: sessionSecretName}, sessionSecret); err != nil {
+			return err
+		}
+		return controllerutil.SetControllerReference(sessionSecret, child, r.Scheme)
+	}
+
+	persistAfterTriggerDeletion := trigger.GetDeletionTimestamp() != nil && !trigger.GetDeletionTimestamp().IsZero()
+	if persistAfterTriggerDeletion {
 		return nil
 	}
 
-	sessionSecret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: sessionSecretName}, sessionSecret); err != nil {
-		return err
-	}
-	return controllerutil.SetControllerReference(sessionSecret, configMap, r.Scheme)
+	return controllerutil.SetControllerReference(trigger, child, r.Scheme)
 }
 
 func (r *PiTriggerReconciler) expiredOwnerLeaseName(ctx context.Context, trigger *triggersv1.PiTrigger, now time.Time) (string, bool, error) {
@@ -1116,7 +1158,7 @@ func (r *PiTriggerReconciler) expiredOwnerLeaseName(ctx context.Context, trigger
 	return "", false, nil
 }
 
-func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, jobName, inputConfigMapName string) string {
+func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, jobName string) string {
 	parts := []string{baseMessage}
 	if triggerRefName != "" {
 		parts = append(parts, fmt.Sprintf("trigger=%s", triggerRefName))
@@ -1127,30 +1169,93 @@ func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, 
 	if jobName != "" {
 		parts = append(parts, fmt.Sprintf("job=%s", jobName))
 	}
-	if inputConfigMapName != "" {
-		parts = append(parts, fmt.Sprintf("inputConfigMap=%s", inputConfigMapName))
-	}
 	return strings.Join(parts, "; ")
 }
 
-func buildRecoverablePiTriggerWorkerPrompt(trigger *triggersv1.PiTrigger, jobName string, extraSections ...string) (string, error) {
-	triggerSpecSkill, err := buildPiTriggerSpecSkill(trigger.Spec)
-	if err != nil {
-		return "", err
-	}
-
-	sections := []string{triggerSpecSkill}
+func buildRecoverablePiTriggerWorkerPrompt(trigger *triggersv1.PiTrigger, jobName string, extraSections ...string) string {
+	sections := []string{}
 	if wakeupPrompt := buildPiTriggerWakeupPrompt(trigger, jobName); wakeupPrompt != "" {
 		sections = append(sections, wakeupPrompt)
 	}
 	sections = append(sections,
-		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the provided event payload.",
-		fmt.Sprintf("The triggering Kubernetes event payload is available in the container at %s.", piTriggerEventFilePath),
-		fmt.Sprintf("Trigger metadata is available in the container at %s.", piTriggerMetadataFilePath),
+		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the runtime PiTrigger skills.",
+		"The `pi-trigger-runtime-input` skill is generated by the runtime extension from the injected job environment and contains the decoded triggering event payload plus trigger metadata for this execution.",
+		"The `pi-subagent-defaults-runtime` skill is generated from the injected PiTrigger agent defaults and should be used whenever this worker needs to create or hibernate sub-agents.",
+		"Use those runtime skills as the source of truth instead of looking for mounted event.json or metadata.json files or a prompt-prefixed sub-agent defaults payload.",
 	)
 	sections = append(sections, extraSections...)
-	sections = append(sections, "Use pi tools to inspect these files as needed before acting.")
-	return strings.Join(sections, "\n\n"), nil
+	sections = append(sections, "Load the runtime skills before acting so you can inspect the decoded event, trigger metadata, and sub-agent defaults.")
+	return strings.Join(sections, "\n\n")
+}
+
+func buildPiTriggerSubAgentDefaultsEnvValue(namespace, traceID string, agent triggersv1.PiAgentSpec) (string, error) {
+	payload, err := json.Marshal(piTriggerSubAgentDefaults{Namespace: namespace, TraceID: traceID, Agent: agent})
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(payload), nil
+}
+
+func buildPiTriggerTraceID(trigger *triggersv1.PiTrigger, eventPayload piTriggerEventInput) string {
+	if trigger != nil {
+		if traceID := strings.TrimSpace(trigger.GetLabels()[piTriggerTraceIDLabel]); traceID != "" {
+			return traceID
+		}
+	}
+	if metadata, ok := eventPayload.Object["metadata"].(map[string]interface{}); ok {
+		if uid, ok := metadata["uid"].(string); ok && strings.TrimSpace(uid) != "" {
+			return trimPiKubeLabelValue(fmt.Sprintf("%s-%d", uid, time.Now().Unix()), 63)
+		}
+	}
+	if trigger != nil && strings.TrimSpace(trigger.Name) != "" {
+		seed := trigger.Name
+		if trigger.Namespace != "" {
+			seed = trigger.Namespace + "-" + trigger.Name
+		}
+		return trimPiKubeLabelValue(fmt.Sprintf("%s-%d", seed, time.Now().Unix()), 63)
+	}
+	return trimPiKubeLabelValue(fmt.Sprintf("pi-%d", time.Now().Unix()), 63)
+}
+
+func buildPiTriggerRuntimeInputEnvValue(eventPayload piTriggerEventInput, metadataPayload piTriggerJobMetadata) (string, error) {
+	payload, err := json.Marshal(piTriggerRuntimeInput{Event: eventPayload, Metadata: metadataPayload})
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(payload), nil
+}
+
+func mergePiTriggerWorkerExtensions(extensions []string) []string {
+	merged := make([]string, 0, len(extensions)+1)
+	seen := map[string]struct{}{}
+	for _, extension := range append([]string{piTriggerRuntimeExtensionPath}, extensions...) {
+		trimmed := strings.TrimSpace(extension)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+	return merged
+}
+
+func buildPiTriggerWorkerEnv(agentEnv []corev1.EnvVar, inputBase64, subAgentDefaultsBase64 string) []corev1.EnvVar {
+	env := make([]corev1.EnvVar, 0, len(agentEnv)+3)
+	env = append(env, corev1.EnvVar{Name: "HOME", Value: piTriggerWorkerHomeDir})
+	for _, candidate := range agentEnv {
+		if candidate.Name == "HOME" || candidate.Name == piTriggerWorkerInputEnvVar || candidate.Name == piTriggerSubAgentDefaultsEnvVar {
+			continue
+		}
+		env = append(env, candidate)
+	}
+	env = append(env,
+		corev1.EnvVar{Name: piTriggerWorkerInputEnvVar, Value: inputBase64},
+		corev1.EnvVar{Name: piTriggerSubAgentDefaultsEnvVar, Value: subAgentDefaultsBase64},
+	)
+	return env
 }
 
 func buildPiTriggerWakeupPrompt(trigger *triggersv1.PiTrigger, jobName string) string {
@@ -1202,23 +1307,12 @@ func parsePiTriggerSessionIdentity(triggerName string) (string, string, string, 
 	return "", "", "", false
 }
 
-func buildPiTriggerSpecSkill(triggerSpec triggersv1.PiTriggerSpec) (string, error) {
-	payload, err := json.Marshal(triggerSpec)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("sub-agent defaults base64://%s", base64.StdEncoding.EncodeToString(payload)), nil
-}
-
 func buildPiTriggerWorkerArgs(prompt string, agent triggersv1.PiAgentSpec) []string {
 	args := []string{"--mode", "json"}
 	if agent.NoExtensions {
 		args = append(args, "--no-extensions")
 	}
-	for _, extension := range agent.Extensions {
-		if strings.TrimSpace(extension) == "" {
-			continue
-		}
+	for _, extension := range mergePiTriggerWorkerExtensions(agent.Extensions) {
 		args = append(args, "--extension", extension)
 	}
 	if agent.Provider != "" {
@@ -1319,6 +1413,26 @@ func validatePiAgentConfigRefs(ctx context.Context, getter kubeGetter, namespace
 	}
 
 	return nil
+}
+
+func trimPiKubeLabelValue(value string, maxLength int) string {
+	lowered := strings.ToLower(value)
+	replaced := strings.NewReplacer("_", "-", "/", "-", ":", "-", " ", "-").Replace(lowered)
+	filtered := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '.' {
+			return r
+		}
+		return '-'
+	}, replaced)
+	collapsed := regexp.MustCompile(`-+`).ReplaceAllString(filtered, "-")
+	trimmed := strings.Trim(collapsed, "-.")
+	if maxLength > 0 && len(trimmed) > maxLength {
+		trimmed = strings.Trim(trimmed[:maxLength], "-.")
+	}
+	if trimmed == "" {
+		return "pi"
+	}
+	return trimmed
 }
 
 func buildPiTriggerResourceName(triggerName, suffix, kind string) string {

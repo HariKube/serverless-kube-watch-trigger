@@ -6,7 +6,7 @@ export default function registerLoadSubagentDefaults(pi) {
     name: 'load_subagent_defaults',
     label: 'load_subagent_defaults',
     description:
-      'Parse the sub-agent defaults base64 prefix from a prompt, validate it, and return the cleaned prompt with normalized defaults.',
+      'Low-level legacy helper: parse the sub-agent defaults base64 prefix from a prompt, validate it, and return the cleaned prompt with normalized defaults.',
     parameters: Type.Object({
       prompt: Type.String({ description: 'The full prompt that may start with sub-agent defaults base64://...' }),
       fallbackNamespace: Type.Optional(

@@ -5,19 +5,12 @@ description: Run one bounded kubectl command in the current cluster with the Pod
 
 # Kubernetes with `exec_kubectl`
 
-Use `exec_kubectl` for cluster reads and writes.
-
-## Parameters
-
-- `command`: everything after `kubectl`
-- `namespace` (optional): passed as `-n <namespace>`
-- `input` (optional): STDIN for `apply -f -` or `replace -f -`
-- `retryOnConflict` (optional): retries replace/apply conflicts
+Use `exec_kubectl` for one-off reads or writes. Prefer higher-level session tools like `hibernate_session` and `handle_session_wakeup` for the standard hibernation/wake-up flows.
 
 ## Rules
 
 - Pass exactly one kubectl command.
 - Do not include the `kubectl` prefix.
-- Use structured output like `-o json` when another tool will read it.
+- Prefer structured output like `-o json`.
 - Prefer `input` over shell here-docs.
-- Verify writes with a follow-up read when correctness matters.
+- Use follow-up reads when correctness matters.

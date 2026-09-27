@@ -9,6 +9,8 @@ At its core, it watches selected Kubernetes resources (built-in or CRDs) using e
 
 Please follow the guide in the [release](https://github.com/HariKube/serverless-kube-watch-trigger/releases) section.
 
+> Note: The default install manifests do not grant arbitrary list/watch RBAC for every possible watched resource kind — if your triggers will watch additional kinds (CRDs or built-in types), grant the controller additional list/watch RBAC for those kinds.
+
 ## Documentation
 
 Additional operator documentation lives under [`docs/`](docs/):
@@ -70,6 +72,10 @@ spec:
   concurrency: 5 # Optional
   sendInitialEvents: false # Optional
   lockDuration: 45s # Optional, enables annotation locking for this trigger using a 45s lease
+
+  # Optional: point watcher loops at an alternate cluster by referencing a Secret (must contain kubeconfig under key "kubeconfig")
+  watcherKubeconfigSecret:
+    name: external-cluster-kubeconfig
 
   # --- Endpoint ---
   url: # Select one option
@@ -155,6 +161,7 @@ spec:
 | `concurrency`       | Max parallel triggers.                                                                 |
 | `sendInitialEvents` | Whether to emit initial events for existing objects.                                   |
 | `lockDuration`      | Optional per-trigger annotation lease duration; a non-zero value enables annotation locking for that trigger. |
+| `watcherKubeconfigSecret` | Optional Secret reference (LocalObjectReference). When set, the controller reads the Secret's `kubeconfig` data and uses it to point watcher loops at an alternate Kubernetes cluster; omit this field to preserve the default in-cluster watcher behavior. |
 
 ---
 
@@ -224,7 +231,7 @@ successful delivery resets the gate.
 
 **Observability.** Per-trigger delivery metrics are exported on the standard
 controller-runtime `/metrics` endpoint under the `serverless_kube_watch_trigger_delivery_*`
-family:
+family; the metrics family exists in the operator, however the default install manifests leave the `/metrics` endpoint disabled — enable the optional metrics service/patches in the install bundle to expose `/metrics`.
 
 | Metric                                        | Labels                                  | Meaning                                  |
 | --------------------------------------------- | --------------------------------------- | ---------------------------------------- |
@@ -281,6 +288,9 @@ spec:
     - MODIFIED
   eventFilter: 'ne .status.availableReplicas 0'
   lockDuration: 5m # Optional, enables annotation locking for this trigger using a 5m lease
+  # Optional: point watcher loops at an alternate cluster by referencing a Secret (must contain kubeconfig under key "kubeconfig")
+  watcherKubeconfigSecret:
+    name: external-cluster-kubeconfig
   timeout: 24h # Optional, limits the watcher/session lifetime for this PiTrigger (enforced from trigger creation timestamp; not reset on reconcile)
 
   agent:
@@ -399,15 +409,15 @@ Instead of keeping heavy agent processes, long-lived WebSocket connections, or e
 1. **Create or Update the Session Secret:** When a parent agent hibernates, it first writes the session context and worker plan into a Kubernetes Secret.
 2. **Refetch the Secret for Its UID:** The flow then reads that Secret back so the real Kubernetes UID is known and can be used for owner references.
 3. **Create Secret-Owned Worker Watchers:** Only after that second pass does the parent create one worker `PiTrigger` per pending sub-agent, with each worker trigger owned by the session Secret.
-4. **Job-Watch Fan-Out:** Each worker `PiTrigger` watches the matching worker Job, and when needed creates the `pi` Job plus its input ConfigMap for that worker flow; those worker resources are owned by the `PiTrigger`, not directly by the Secret.
+4. **Job-Watch Fan-Out:** Each worker `PiTrigger` watches the matching worker Job, and when needed creates the `pi` Job for that worker flow with the trigger event/metadata injected as a base64 environment payload; those worker resources are owned by the `PiTrigger`, not directly by the Secret.
 5. **Timeout-Bounded Sessions:** `spec.timeout` limits the lifetime of the worker watcher/session and is enforced from the trigger's creation timestamp (it is not restarted on each reconcile); when it expires the controller emits a final deleted-event timeout cleanup (PiTrigger: a final cleanup Job/message; HTTPTrigger: a deleted-event timeout callback/message) and then removes the timed-out trigger.
 6. **State Reload & Resume:** When a worker reports back, the wake-up flow reads the stored session Secret, records the result, and resumes the parent with the accumulated context.
-7. **Terminal Cleanup by Secret Deletion:** Final cleanup deletes the session Secret, which garbage-collects the Secret-owned worker `PiTrigger`s; each `PiTrigger` then cleans up its owned Jobs and input ConfigMaps.
+7. **Terminal Cleanup by Secret Deletion:** Final cleanup deletes the session Secret, which garbage-collects the Secret-owned worker `PiTrigger`s; each `PiTrigger` then cleans up its owned Jobs.
 
 #### What Is It Good For?
 
 * **Zero-Idle Multi-Agent Workflows:** Run complex multi-step AI pipelines without paying for idle server time. Agents only consume resources when actively processing data.
-* **Resilient Distributed Checkpointing:** Since execution state is committed to Kafka or the Kubernetes API Server before sleeping, agents can survive node restarts, rescheduling, or pod evictions without losing progress.
+* **Resilient Distributed Checkpointing:** Since execution state is committed to Kubernetes objects (for example, Secrets) before sleeping, agents can survive node restarts, rescheduling, or pod evictions without losing progress.
 * **Leaderless Parallel Concurrency:** Bypasses traditional single-leader `etcd` bottlenecks. Hundreds of transient triggers can reconcile simultaneously across independent storage partition workers.
 * **No External Queue Dependencies:** Eliminates the need for Redis, Celery, or external pub/sub brokers. Session persistence, watch fan-out, and cleanup stay inside native Kubernetes objects and controller workflows.
 * **Native RBAC & Network Security:** Ephemeral agent triggers inherit standard Kubernetes security semantics out of the box—no custom permission systems required.
@@ -469,6 +479,20 @@ Then reference it from `spec.agent.image`.
 
 ### Including extensions
 
+| Tool | Reason | Where to find |
+| --- | --- | --- |
+| `exec_kubectl` | Run one bounded in-cluster `kubectl` command from a worker. | `hack/pi-agent/exec-kubectl.ts` |
+| `resolve_subagent_defaults` | Resolve worker delegation defaults from runtime env or legacy prompt prefix. | `hack/pi-agent/subagent-defaults.ts` |
+| `decision_maker` | Validate whether work should stay local or be delegated. | `hack/pi-agent/decision-maker.ts` |
+| `headless` | Run one bounded dependent task in a separate headless `pi` process. | `hack/pi-agent/headless.ts` |
+| `prepare_session_hibernation` | Generate session Secret and worker PiTrigger manifests for delegated flows. | `hack/pi-agent/prepare-session-hibernation.ts` |
+| `process_session_wakeup` | Fold a worker report back into stored session state. | `hack/pi-agent/process-session-wakeup.ts` |
+| `hibernate_session` | Persist a parent session and create delegated worker PiTriggers. | `hack/pi-agent/session-backup.ts` |
+| `handle_session_wakeup` | Fetch wake-up state from Kubernetes and persist the updated session Secret. | `hack/pi-agent/session-wakeup.ts` |
+| `choose_execution_mode` | Choose `stay-local`, `headless`, or `delegate` using shared timeout rules. | `hack/pi-agent/execution-mode.ts` |
+| `orchestrate_subagent_execution` | Combine execution-mode selection with optional delegation/hibernation setup. | `hack/pi-agent/subagent-orchestrator.ts` |
+| `exit_pi` | Terminate the worker process cleanly after state is persisted or intentionally abandoned. | `hack/pi-agent/exit.ts` |
+
 You can load pi extensions in two ways:
 
 #### Bake extensions into the image
@@ -515,7 +539,7 @@ This is the easiest way to ship team-specific prompts, reusable skills, or per-e
 `PiTrigger` supports the same:
 
 * resource selection (`resource`, `namespaces`, `labelSelectors`, `fieldSelectors`, `eventTypes`, `eventFilter`)
-* watcher controls (`concurrency`, `sendInitialEvents`, `timeout`, `lockDuration`)
+* watcher controls (`concurrency`, `sendInitialEvents`, `timeout`, `lockDuration`, `watcherKubeconfigSecret`)
 * status handling and automatic watcher restart behavior
 
 In addition, `spec.timeout` controls the watcher/session lifetime and is enforced from the trigger's creation timestamp (not reset on reconcile); `spec.agent` defines the spawned worker Job:
@@ -543,9 +567,9 @@ In addition, `spec.timeout` controls the watcher/session lifetime and is enforce
 
 ### Notes
 
-* Each matching event produces an input ConfigMap with `event.json` and `metadata.json`, then the operator creates a Job to run `pi`; the `PiTrigger` normally owns both resources.
-* In session-hibernation fan-out, worker `PiTrigger`s are created in a second pass after the session Secret exists and its UID has been read back; the Secret owns those worker triggers, and each worker `PiTrigger` owns its own Job and input ConfigMap.
-* `event.json` contains the watched object payload and `metadata.json` contains trigger and resource-version metadata for the run.
+* Each matching event is rendered as base64-encoded JSON in `PI_TRIGGER_INPUT_BASE64`, and the worker's PiTrigger delegation defaults are rendered as base64-encoded JSON in `PI_SUBAGENT_DEFAULTS_BASE64`, before the operator creates a Job to run `pi`.
+* The bundled `pitrigger-input.ts` extension decodes both environment variables once at startup, fails fast if either is missing, and publishes dynamic `pi-trigger-runtime-input` and `pi-subagent-defaults-runtime` skills with the decoded runtime payloads.
+* In session-hibernation fan-out, worker `PiTrigger`s are created in a second pass after the session Secret exists and its UID has been read back; the Secret owns those worker triggers, and each worker `PiTrigger` owns its own Job.
 * Use `promptsConfigMapRef` and `skillsConfigMapRef` to ship custom prompts and skills with the worker image.
 * The Job keeps the image `ENTRYPOINT` and passes `pi` runtime options through container args.
 

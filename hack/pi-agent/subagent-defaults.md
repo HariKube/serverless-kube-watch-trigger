@@ -1,24 +1,21 @@
 ---
 name: pi-subagent-defaults
-description: Load and validate the `sub-agent defaults base64://...` prefix once, then reuse the decoded defaults for the rest of the session.
+description: Resolve sub-agent defaults for the current session, preferring injected runtime defaults and falling back to the legacy prompt prefix only when necessary.
 ---
 
 # Pi Sub-Agent Defaults
 
-Use `load_subagent_defaults` at the start of a session when the prompt may include a sub-agent defaults prefix.
+Prefer `orchestrate_subagent_execution` or `resolve_subagent_defaults`. The orchestrator already resolves defaults before choosing a mode or hibernating a session.
 
 ## Flow
 
-1. Call `load_subagent_defaults` with the full prompt.
-2. If `found=false` on a first-run session, there are no defaults. Do not invent them.
-3. If `found=true`, keep both:
-   - `subAgentDefaults`: the normalized defaults object;
-   - `cleanedPrompt`: the prompt with the prefix removed.
-4. Reuse the same `subAgentDefaults` for every later hibernation or wake-up step.
+1. Call `resolve_subagent_defaults` once near the start of any delegation, hibernation, or wake-up path.
+2. Reuse the returned `subAgentDefaults` and `cleanedPrompt` for the rest of the session.
+3. If `found=false`, do not invent defaults.
 
 ## Rules
 
-- Accept both `sub-agent defaults` and the typo `sub-agent defauls`.
-- Never echo the base64 payload back to the user.
-- Stop on decode or validation errors, and if the current path cannot recover, call `exit_pi` with a non-zero `exitCode`.
-- Treat the extension output as the source of truth for decoded defaults like `namespace` and `maxParallel`, and rely on the embedded agent configuration/runtime defaults for hibernation and wake-up behavior.
+- Prefer runtime defaults over prompt parsing.
+- Never echo the legacy base64 payload back to the user.
+- Treat the returned object as the source of truth for namespace, maxParallel, timeout, and embedded `agent` settings.
+- Only fall back to the lower-level `load_subagent_defaults` tool when debugging the resolver itself.

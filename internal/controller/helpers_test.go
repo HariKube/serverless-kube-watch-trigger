@@ -19,9 +19,12 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"text/template"
 	"time"
+
+	"k8s.io/client-go/rest"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
@@ -194,6 +197,37 @@ var _ = Describe("trigger helper utilities", func() {
 		Expect(normalizeHTTPTimeout(2 * time.Second)).To(Equal(2 * time.Second))
 		Expect(methodOrDefault("")).To(Equal("POST"))
 		Expect(methodOrDefault(triggersv1.MethodPatch)).To(Equal("PATCH"))
+	})
+
+	It("rewrites loopback watcher kubeconfigs to the in-cluster apiserver", func() {
+		cfg := &rest.Config{Host: "https://127.0.0.1:45025"}
+		By("using the pod's apiserver env when a watcher kubeconfig points at loopback")
+		DeferCleanup(func() {
+			Expect(os.Unsetenv("KUBERNETES_SERVICE_HOST")).To(Succeed())
+			Expect(os.Unsetenv("KUBERNETES_SERVICE_PORT")).To(Succeed())
+		})
+		Expect(os.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")).To(Succeed())
+		Expect(os.Setenv("KUBERNETES_SERVICE_PORT", "443")).To(Succeed())
+
+		normalizeLoopbackRESTConfigForInCluster(cfg)
+
+		Expect(cfg.Host).To(Equal("https://10.96.0.1:443"))
+		Expect(cfg.TLSClientConfig.ServerName).To(Equal("kubernetes.default.svc"))
+	})
+
+	It("leaves non-loopback watcher kubeconfigs unchanged", func() {
+		cfg := &rest.Config{Host: "https://api.example.test:6443"}
+		DeferCleanup(func() {
+			Expect(os.Unsetenv("KUBERNETES_SERVICE_HOST")).To(Succeed())
+			Expect(os.Unsetenv("KUBERNETES_SERVICE_PORT")).To(Succeed())
+		})
+		Expect(os.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")).To(Succeed())
+		Expect(os.Setenv("KUBERNETES_SERVICE_PORT", "443")).To(Succeed())
+
+		normalizeLoopbackRESTConfigForInCluster(cfg)
+
+		Expect(cfg.Host).To(Equal("https://api.example.test:6443"))
+		Expect(cfg.TLSClientConfig.ServerName).To(BeEmpty())
 	})
 
 	Context("event emission helpers", func() {

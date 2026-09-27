@@ -10,6 +10,10 @@ spec:
   namespaces:
     - default
   timeout: 30m
+  # Optional: specify a Secret containing a kubeconfig to use for watcher access
+  # watcherKubeconfigSecret:
+  #   name: watcher-kubeconfig-secret
+  # Omit to use the default local-cluster watcher
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:

@@ -41,6 +41,47 @@ func TestBuildPiTriggerWorkerArgsDoesNotDisableSessions(t *testing.T) {
 	}
 }
 
+func findEnvVar(container corev1.Container, name string) (string, bool) {
+	for _, env := range container.Env {
+		if env.Name == name {
+			return env.Value, true
+		}
+	}
+	return "", false
+}
+
+func decodePiTriggerRuntimeInput(container corev1.Container) (piTriggerRuntimeInput, error) {
+	encoded, ok := findEnvVar(container, piTriggerWorkerInputEnvVar)
+	if !ok || strings.TrimSpace(encoded) == "" {
+		return piTriggerRuntimeInput{}, fmt.Errorf("missing %s env var", piTriggerWorkerInputEnvVar)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return piTriggerRuntimeInput{}, err
+	}
+	var payload piTriggerRuntimeInput
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return piTriggerRuntimeInput{}, err
+	}
+	return payload, nil
+}
+
+func decodePiTriggerSubAgentDefaults(container corev1.Container) (piTriggerSubAgentDefaults, error) {
+	encoded, ok := findEnvVar(container, piTriggerSubAgentDefaultsEnvVar)
+	if !ok || strings.TrimSpace(encoded) == "" {
+		return piTriggerSubAgentDefaults{}, fmt.Errorf("missing %s env var", piTriggerSubAgentDefaultsEnvVar)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return piTriggerSubAgentDefaults{}, err
+	}
+	var payload piTriggerSubAgentDefaults
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return piTriggerSubAgentDefaults{}, err
+	}
+	return payload, nil
+}
+
 // drainPiTriggerRunningTriggers stops every running trigger and clears the registry without
 // invoking callback functions while holding the reconciler lock. It also waits
 // briefly for any running sessions to be removed.
@@ -498,7 +539,6 @@ var _ = Describe("PiTrigger Controller", func() {
 			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 
 			cleanupJob(bgCtx, jobList.Items[0].Name)
-			cleanupConfigMap(bgCtx, jobList.Items[0].Annotations[piTriggerInputConfigMapAnnotation])
 		})
 
 		It("renders prompt input and creates a worker Job per event", func() {
@@ -571,6 +611,12 @@ var _ = Describe("PiTrigger Controller", func() {
 
 			job := jobList.Items[0]
 			Expect(job.Labels[piTriggerManagedLabel]).To(Equal("true"))
+			Expect(job.OwnerReferences).To(HaveLen(1))
+			Expect(job.OwnerReferences[0].APIVersion).To(Equal("v1"))
+			Expect(job.OwnerReferences[0].Kind).To(Equal("Secret"))
+			Expect(job.OwnerReferences[0].Name).To(Equal(sessionSecretName))
+			Expect(job.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*job.OwnerReferences[0].Controller).To(BeTrue())
 			Expect(job.Spec.BackoffLimit).NotTo(BeNil())
 			Expect(*job.Spec.BackoffLimit).To(Equal(backoffLimit))
 			Expect(job.Spec.TTLSecondsAfterFinished).NotTo(BeNil())
@@ -578,55 +624,67 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(job.Spec.ActiveDeadlineSeconds).NotTo(BeNil())
 			Expect(*job.Spec.ActiveDeadlineSeconds).To(Equal(int64(420)))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("pi-trigger-runner"))
-			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(4))
-			Expect(job.Spec.Template.Spec.Volumes[1].Secret).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[1].Secret.SecretName).To(Equal(secretName))
+			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(3))
+			Expect(job.Spec.Template.Spec.Volumes[0].Secret).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.Volumes[0].Secret.SecretName).To(Equal(secretName))
+			Expect(job.Spec.Template.Spec.Volumes[1].ConfigMap).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.Volumes[1].ConfigMap.Name).To(Equal(promptsCMName))
 			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap.Name).To(Equal(promptsCMName))
-			Expect(job.Spec.Template.Spec.Volumes[3].ConfigMap).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[3].ConfigMap.Name).To(Equal(skillsCMName))
+			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap.Name).To(Equal(skillsCMName))
 			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
 
 			container := job.Spec.Template.Spec.Containers[0]
 			Expect(container.Image).To(Equal("docker.io/mhmxs/pi-agent-empty:latest"))
 			Expect(container.Command).To(BeEmpty())
-			expectedPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name)
-			Expect(err).NotTo(HaveOccurred())
+			expectedPrompt := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name)
 			Expect(expectedPrompt).To(ContainSubstring("Session ID: session-success"))
 			Expect(expectedPrompt).To(ContainSubstring("Round: 4"))
 			Expect(expectedPrompt).To(ContainSubstring("Worker Index: 2"))
 			Expect(expectedPrompt).To(ContainSubstring("Job: " + job.Name))
+			Expect(expectedPrompt).To(ContainSubstring("pi-trigger-runtime-input"))
+			Expect(expectedPrompt).To(ContainSubstring("pi-subagent-defaults-runtime"))
 			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
-			expectedSpecJSON, err := json.Marshal(trigger.Spec)
-			Expect(err).NotTo(HaveOccurred())
-			expectedSkill := fmt.Sprintf("sub-agent defaults base64://%s", base64.StdEncoding.EncodeToString(expectedSpecJSON))
 			promptArg := container.Args[len(container.Args)-1]
 			promptParts := strings.SplitN(promptArg, "Prompt: ", 2)
 			Expect(promptParts).To(HaveLen(2))
-			Expect(promptParts[1]).To(HavePrefix(expectedSkill))
+			Expect(promptParts[1]).To(Equal(expectedPrompt))
 			Expect(container.WorkingDir).To(Equal("/workspace"))
 			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "HOME", Value: piTriggerWorkerHomeDir}))
 			Expect(container.Env).To(ContainElement(corev1.EnvVar{Name: "EXTRA_FLAG", Value: "true"}))
+			Expect(container.Args).To(ContainElement(piTriggerRuntimeExtensionPath))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentSecretVolumeName, MountPath: piTriggerAgentConfigMountPath, ReadOnly: true}))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerPromptsVolumeName, MountPath: piTriggerAgentPromptsMountPath, ReadOnly: true}))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerSkillsVolumeName, MountPath: piTriggerAgentSkillsMountPath, ReadOnly: true}))
 
-			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
-			Expect(inputConfigMapName).NotTo(BeEmpty())
-			inputConfigMap := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
-			Expect(inputConfigMap.OwnerReferences).To(HaveLen(1))
-			Expect(inputConfigMap.OwnerReferences[0].APIVersion).To(Equal(triggersv1.GroupVersion.String()))
-			Expect(inputConfigMap.OwnerReferences[0].Kind).To(Equal("PiTrigger"))
-			Expect(inputConfigMap.OwnerReferences[0].Name).To(Equal(trigger.Name))
-			Expect(inputConfigMap.OwnerReferences[0].Controller).NotTo(BeNil())
-			Expect(*inputConfigMap.OwnerReferences[0].Controller).To(BeTrue())
-			Expect(inputConfigMap.Data).NotTo(HaveKey("worker_config.json"))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "ADDED"`))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(`"triggerName": "pitrigger-success"`))
+			runtimeInput, err := decodePiTriggerRuntimeInput(container)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(runtimeInput.Event.EventType).To(Equal("ADDED"))
+			Expect(runtimeInput.Metadata.TriggerName).To(Equal("pitrigger-success"))
+			subAgentDefaults, err := decodePiTriggerSubAgentDefaults(container)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(subAgentDefaults.Namespace).To(Equal(ns))
+			Expect(subAgentDefaults.Agent.Image).To(Equal(trigger.Spec.Agent.Image))
+
+			// session labels should be propagated to the Job and runtime metadata
+			Expect(job.Labels[piTriggerSessionLabel]).To(Equal("session-success"))
+			Expect(job.Labels[piTriggerRoundLabel]).To(Equal("4"))
+			Expect(job.Labels[piTriggerWorkerLabel]).To(Equal("2"))
+			Expect(job.Labels[piTriggerTraceIDLabel]).NotTo(BeEmpty())
+			Expect(job.Spec.Template.Labels[piTriggerTraceIDLabel]).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(subAgentDefaults.TraceID).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(runtimeInput.Metadata.TraceID).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+
+			// runtime metadata should include structured session/job identity values useful for wake-up
+			Expect(runtimeInput.Metadata.SessionID).To(Equal("session-success"))
+			Expect(runtimeInput.Metadata.Round).To(Equal("4"))
+			Expect(runtimeInput.Metadata.WorkerIndex).To(Equal("2"))
+			Expect(runtimeInput.Metadata.SessionSecretName).To(Equal(sessionSecretName))
+			Expect(runtimeInput.Metadata.JobName).To(Equal(job.Name))
+			managedConfigMaps := &corev1.ConfigMapList{}
+			Expect(k8sClient.List(bgCtx, managedConfigMaps, client.InNamespace(ns), client.MatchingLabels{piTriggerManagedLabel: "true"})).To(Succeed())
+			Expect(managedConfigMaps.Items).To(BeEmpty())
 
 			cleanupJob(bgCtx, job.Name)
-			cleanupConfigMap(bgCtx, inputConfigMapName)
 		})
 	})
 
@@ -652,7 +710,6 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: triggerName})).To(Succeed())
 			for i := range jobList.Items {
 				cleanupJob(bgCtx, jobList.Items[i].Name)
-				cleanupConfigMap(bgCtx, jobList.Items[i].Annotations[piTriggerInputConfigMapAnnotation])
 			}
 		})
 
@@ -744,12 +801,8 @@ var _ = Describe("PiTrigger Controller", func() {
 			promptsCMName = "pitrigger-job-status-prompts"
 			skillsCMName  = "pitrigger-job-status-skills"
 		)
-		var inputConfigMapName string
 
 		AfterEach(func() {
-			if inputConfigMapName != "" {
-				cleanupConfigMap(bgCtx, inputConfigMapName)
-			}
 			cleanupConfigMap(bgCtx, promptsCMName)
 			cleanupConfigMap(bgCtx, skillsCMName)
 			cleanupJob(bgCtx, "pitrigger-job-status-job")
@@ -757,7 +810,7 @@ var _ = Describe("PiTrigger Controller", func() {
 			cleanupSecret(bgCtx, secretName)
 		})
 
-		It("updates trigger status from completed jobs and cleans up input ConfigMaps", func() {
+		It("updates trigger status from completed jobs without extra input cleanup objects", func() {
 			createPiAgentConfigSecret(bgCtx, secretName)
 			createPiAgentConfigMaps(bgCtx, promptsCMName, skillsCMName)
 			trigger := &triggersv1.PiTrigger{
@@ -774,16 +827,12 @@ var _ = Describe("PiTrigger Controller", func() {
 			}
 			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
 
-			inputConfigMapName = "pitrigger-job-status-input"
-			Expect(k8sClient.Create(bgCtx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: inputConfigMapName, Namespace: ns}})).To(Succeed())
-
 			job := &batchv1.Job{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "pitrigger-job-status-job",
 					Namespace: ns,
 					Labels:    map[string]string{piTriggerManagedLabel: "true", piTriggerTriggerNameLabel: triggerName},
 					Annotations: map[string]string{
-						piTriggerInputConfigMapAnnotation:  inputConfigMapName,
 						piTriggerEventTypeAnnotation:       "ADDED",
 						piTriggerResourceVersionAnnotation: "42",
 					},
@@ -825,11 +874,6 @@ var _ = Describe("PiTrigger Controller", func() {
 				g.Expect(updated.Status.ErrorResourceVersion).To(BeEmpty())
 			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 
-			Eventually(func() bool {
-				err := k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, &corev1.ConfigMap{})
-				return apierrors.IsNotFound(err)
-			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
-			inputConfigMapName = ""
 		})
 	})
 
@@ -957,7 +1001,6 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: name})).To(Succeed())
 			for i := range jobList.Items {
 				cleanupJob(bgCtx, jobList.Items[i].Name)
-				cleanupConfigMap(bgCtx, jobList.Items[i].Annotations[piTriggerInputConfigMapAnnotation])
 			}
 
 			trigger := &triggersv1.PiTrigger{}
@@ -1048,13 +1091,17 @@ var _ = Describe("PiTrigger Controller", func() {
 			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 
 			job := jobList.Items[0]
-			Expect(job.OwnerReferences).To(BeEmpty())
+			Expect(job.OwnerReferences).To(HaveLen(1))
+			Expect(job.OwnerReferences[0].APIVersion).To(Equal("v1"))
+			Expect(job.OwnerReferences[0].Kind).To(Equal("Secret"))
+			Expect(job.OwnerReferences[0].Name).To(Equal(sessionSecretName))
+			Expect(job.OwnerReferences[0].Controller).NotTo(BeNil())
+			Expect(*job.OwnerReferences[0].Controller).To(BeTrue())
 			Expect(job.Spec.TTLSecondsAfterFinished).NotTo(BeNil())
 			Expect(*job.Spec.TTLSecondsAfterFinished).To(Equal(int32(86400)))
 			Expect(job.Spec.ActiveDeadlineSeconds).To(BeNil())
 			container := job.Spec.Template.Spec.Containers[0]
-			expectedPrompt, err := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name, fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName))
-			Expect(err).NotTo(HaveOccurred())
+			expectedPrompt := buildRecoverablePiTriggerWorkerPrompt(trigger, job.Name, fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName))
 			Expect(expectedPrompt).To(ContainSubstring("TIMED_OUT"))
 			Expect(expectedPrompt).To(ContainSubstring(fmt.Sprintf("owner lease %s timed out", leaseName)))
 			Expect(expectedPrompt).To(ContainSubstring("Session ID: session-timeout"))
@@ -1063,24 +1110,28 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(expectedPrompt).To(ContainSubstring("Job: " + job.Name))
 			Expect(container.Args).To(Equal(buildPiTriggerWorkerArgs(expectedPrompt, trigger.Spec.Agent)))
 
-			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
-			inputConfigMap := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
-			Expect(inputConfigMap.OwnerReferences).To(HaveLen(1))
-			Expect(inputConfigMap.OwnerReferences[0].APIVersion).To(Equal("v1"))
-			Expect(inputConfigMap.OwnerReferences[0].Kind).To(Equal("Secret"))
-			Expect(inputConfigMap.OwnerReferences[0].Name).To(Equal(sessionSecretName))
-			Expect(inputConfigMap.OwnerReferences[0].Controller).NotTo(BeNil())
-			Expect(*inputConfigMap.OwnerReferences[0].Controller).To(BeTrue())
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "DELETED"`))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Name))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(nsn.String()))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Name))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(nsn.String()))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+			runtimeInput, err := decodePiTriggerRuntimeInput(container)
+			Expect(err).NotTo(HaveOccurred())
+			payloadJSON, err := json.Marshal(runtimeInput)
+			Expect(err).NotTo(HaveOccurred())
+			payloadText := string(payloadJSON)
+			Expect(payloadText).To(ContainSubstring(`"eventType":"DELETED"`))
+			Expect(payloadText).To(ContainSubstring(`owner lease ` + leaseName + ` timed out`))
+			Expect(payloadText).To(ContainSubstring(job.Name))
+			Expect(payloadText).To(ContainSubstring(nsn.String()))
+			Expect(payloadText).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+
+			// session labels and metadata should be present for deterministic wake-up/restore
+			Expect(job.Labels[piTriggerSessionLabel]).To(Equal("session-timeout"))
+			Expect(job.Labels[piTriggerRoundLabel]).To(Equal("7"))
+			Expect(job.Labels[piTriggerWorkerLabel]).To(Equal("1"))
+			Expect(job.Labels[piTriggerTraceIDLabel]).NotTo(BeEmpty())
+			Expect(job.Spec.Template.Labels[piTriggerTraceIDLabel]).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(runtimeInput.Metadata.TraceID).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(runtimeInput.Metadata.SessionID).To(Equal("session-timeout"))
+			Expect(runtimeInput.Metadata.Round).To(Equal("7"))
+			Expect(runtimeInput.Metadata.WorkerIndex).To(Equal("1"))
+			Expect(runtimeInput.Metadata.SessionSecretName).To(Equal(sessionSecretName))
 		})
 
 		// Regression test: when a trigger has already exceeded spec.timeout before the first
@@ -1101,7 +1152,6 @@ var _ = Describe("PiTrigger Controller", func() {
 				_ = k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: expiredTriggerName})
 				for i := range jobList.Items {
 					cleanupJob(bgCtx, jobList.Items[i].Name)
-					cleanupConfigMap(bgCtx, jobList.Items[i].Annotations[piTriggerInputConfigMapAnnotation])
 				}
 				cleanupConfigMap(bgCtx, expiredPromptsName)
 				cleanupConfigMap(bgCtx, expiredSkillsName)
@@ -1178,18 +1228,32 @@ var _ = Describe("PiTrigger Controller", func() {
 			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 
 			job := jobList.Items[0]
-			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
-			inputConfigMap := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "DELETED"`))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring("trigger session timed out"))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Name))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(nsn.String()))
-			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring("trigger session timed out"))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Name))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(nsn.String()))
-			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+			container := job.Spec.Template.Spec.Containers[0]
+			runtimeInput, err := decodePiTriggerRuntimeInput(container)
+			Expect(err).NotTo(HaveOccurred())
+			payloadJSON, err := json.Marshal(runtimeInput)
+			Expect(err).NotTo(HaveOccurred())
+			payloadText := string(payloadJSON)
+			Expect(payloadText).To(ContainSubstring(`"eventType":"DELETED"`))
+			Expect(payloadText).To(ContainSubstring("trigger session timed out"))
+			Expect(payloadText).To(ContainSubstring(job.Name))
+			Expect(payloadText).To(ContainSubstring(nsn.String()))
+			Expect(payloadText).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+
+			// session identity should be preserved in labels/metadata for restore
+			Expect(job.Labels[piTriggerSessionLabel]).To(Equal("session-expired"))
+			Expect(job.Labels[piTriggerRoundLabel]).To(Equal("1"))
+			Expect(job.Labels[piTriggerWorkerLabel]).To(Equal("0"))
+			Expect(job.Labels[piTriggerTraceIDLabel]).NotTo(BeEmpty())
+			Expect(job.Spec.Template.Labels[piTriggerTraceIDLabel]).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(runtimeInput.Metadata.TraceID).To(Equal(job.Labels[piTriggerTraceIDLabel]))
+			Expect(runtimeInput.Metadata.SessionID).To(Equal("session-expired"))
+			Expect(runtimeInput.Metadata.Round).To(Equal("1"))
+			Expect(runtimeInput.Metadata.WorkerIndex).To(Equal("0"))
+			// when the trigger is deleting, the session secret should directly own the worker Job
+			Expect(job.OwnerReferences).ToNot(BeEmpty())
+			Expect(job.OwnerReferences[0].Kind).To(Equal("Secret"))
+			Expect(job.OwnerReferences[0].Name).To(Equal(expiredSessionSecret))
 
 			// trigger must still be in deleting state and retain the finalizer so cleanup can proceed
 			latest = &triggersv1.PiTrigger{}

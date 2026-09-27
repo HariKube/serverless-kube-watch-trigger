@@ -552,7 +552,10 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		return err
 	}
 
-	resourceClient := r.DynamicClient.Resource(gvr)
+	resourceClient, err := getWatcherResourceClient(depFetchCtx, r, trigger.Namespace, r.DynamicClient.Resource(gvr), trigger.Spec.WatcherKubeconfigSecret, gvr)
+	if err != nil {
+		return err
+	}
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
 
 	sessionTimeout := trigger.Spec.Timeout.Duration
