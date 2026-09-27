@@ -120,27 +120,15 @@ test('prepareSessionHibernation builds context and manifests for pending workers
   assert.equal(prepared.pendingSubagents, 1);
   assert.equal(prepared.secretManifest.metadata.labels['harikube.info/pending-subagents'], '1');
   assert.equal(prepared.leaseManifests.length, 0);
-  assert.equal(prepared.triggerManifests.length, 1);
+  // This flow now requires a second pass so the first pass does not emit PiTrigger manifests
+  assert.equal(prepared.requiresSecretOwnershipPass, true);
+  assert.equal(prepared.triggerManifests.length, 0);
   assert.deepEqual(prepared.context.sourceOwnerReference, sourceOwnerReference);
   assert.match(prepared.workers[1].prompt, /Worker Index: 2/);
-  assert.equal(prepared.triggerManifests[0].metadata.name, prepared.workers[1].triggerName);
-  assert.deepEqual(prepared.triggerManifests[0].metadata.annotations, {
-    'harikube.info/session-secret': 'pi-session-s-demo',
-    'harikube.info/output-location': 'out/2.md'
-  });
-  assert.deepEqual(prepared.triggerManifests[0].spec.resource, { apiVersion: 'batch/v1', kind: 'Job' });
-  assert.deepEqual(prepared.triggerManifests[0].spec.labelSelectors, [
-    `triggers.harikube.info/pitrigger-name=${prepared.workers[1].triggerName}`
-  ]);
-  assert.deepEqual(prepared.triggerManifests[0].spec.eventTypes, ['ADDED', 'MODIFIED']);
-  assert.match(prepared.triggerManifests[0].spec.eventFilter, /^or \.status\.completionTime/);
-  assert.match(prepared.triggerManifests[0].spec.eventFilter, /"Complete"/);
-  assert.match(prepared.triggerManifests[0].spec.eventFilter, /"Failed"/);
-  assert.equal(prepared.triggerManifests[0].spec.timeout, '24h');
+  // worker bookkeeping remains populated even before the second pass
   assert.deepEqual(prepared.cleanup.workerTriggerNames, prepared.workers.map(worker => worker.triggerName));
   assert.deepEqual(prepared.context.cleanup, prepared.cleanup);
   assert.deepEqual(prepared.secretManifest.metadata.ownerReferences, [sourceOwnerReference]);
-  assert.deepEqual(prepared.triggerManifests[0].metadata.ownerReferences, [sourceOwnerReference]);
 });
 
 
@@ -269,29 +257,10 @@ test('prepareSessionHibernation fans out one PiTrigger per pending worker and wa
 
   assert.equal(prepared.pendingSubagents, 2);
   assert.equal(prepared.leaseManifests.length, 0);
-  assert.equal(prepared.triggerManifests.length, 2);
-  assert.notEqual(prepared.triggerManifests[0].metadata.name, prepared.triggerManifests[1].metadata.name);
-  assert.deepEqual(
-    prepared.triggerManifests.map(trigger => trigger.metadata.name),
-    prepared.workers.map(worker => worker.triggerName)
-  );
-  assert.deepEqual(
-    prepared.triggerManifests.map(trigger => trigger.spec.resource),
-    prepared.workers.map(() => ({ apiVersion: 'batch/v1', kind: 'Job' }))
-  );
-  assert.deepEqual(
-    prepared.triggerManifests.map(trigger => trigger.spec.maxJobs),
-    [1, 1]
-  );
-  assert.deepEqual(
-    prepared.triggerManifests.map(trigger => trigger.spec.timeout),
-    ['24h', '24h']
-  );
-  assert.deepEqual(
-    prepared.triggerManifests.map(trigger => trigger.spec.labelSelectors[0]),
-    prepared.workers.map(worker => `triggers.harikube.info/pitrigger-name=${worker.triggerName}`)
-  );
-  assert.equal(prepared.triggerManifests.every(trigger => /\.status\.completionTime/.test(trigger.spec.eventFilter)), true);
+  // First pass reserves secret ownership; PiTrigger manifests are emitted on the second pass
+  assert.equal(prepared.requiresSecretOwnershipPass, true);
+  assert.equal(prepared.triggerManifests.length, 0);
+  // cleanup and worker bookkeeping should still be available before the second pass
   assert.deepEqual(prepared.cleanup.workerTriggerNames, prepared.workers.map(worker => worker.triggerName));
 });
 
@@ -408,6 +377,81 @@ test('processSessionWakeup records one worker and waits when other workers are s
   assert.deepEqual(result.cleanup, prepared.cleanup);
   assert.equal(result.context.workers[0].triggerName, prepared.context.workers[0].triggerName);
   assert.match(result.exitReason, /1 pending/);
+});
+
+test('processSessionWakeup ignores stale pending label and derives pending state from stored results', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [
+      { index: 1, task: 'Analyze', expectedResult: 'summary', outputLocation: 'out/1.md' },
+      { index: 2, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/2.md' }
+    ],
+    sessionId: 's-demo',
+    round: 1
+  });
+
+  // Build a stored secret but poison the label to simulate a stale value while also
+  // including an existing result for worker 2 so the true pending count should be 0
+  const stored = JSON.parse(buildStoredSecret(prepared));
+  stored.metadata = stored.metadata || {};
+  stored.metadata.labels = stored.metadata.labels || {};
+  stored.metadata.labels['harikube.info/pending-subagents'] = '99';
+  stored.data['result-r1-w2.json'] = Buffer.from(JSON.stringify({ outcome: 'succeeded', summary: 'done' }), 'utf8').toString('base64');
+  const secretJson = JSON.stringify(stored);
+
+  const result = processSessionWakeup({
+    prompt: buildWakeupPrompt({ workerIndex: 1, jobName: 'worker-1' }),
+    secretJson,
+    workerSummary: 'Analysis complete.',
+    jobJson: JSON.stringify({
+      status: {
+        conditions: [{ type: 'Complete', status: 'True', message: 'done' }]
+      }
+    }),
+    eventsJson: JSON.stringify({ items: [{ reason: 'Completed', message: 'Job finished.' }] })
+  });
+
+  // Despite the stale label of 99, the stored result for worker 2 means this should be the last report
+  assert.equal(result.action, 'merge');
+  assert.equal(result.pendingCount, 0);
+  assert.equal(result.context.status, 'merging');
+  assert.equal(result.result.outcome, 'succeeded');
+});
+
+test('processSessionWakeup marks reporting worker completed and preserves stored result in context.workers', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [{ index: 1, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/1.md' }],
+    sessionId: 's-demo',
+    round: 1
+  });
+
+  const secretJson = buildStoredSecret(prepared);
+  const result = processSessionWakeup({
+    prompt: buildWakeupPrompt({ jobName: 'worker-1' }),
+    secretJson,
+    workerSummary: 'Patch applied.',
+    jobJson: JSON.stringify({
+      status: {
+        conditions: [{ type: 'Complete', status: 'True', message: 'done' }]
+      }
+    }),
+    eventsJson: JSON.stringify({ items: [{ reason: 'Completed', message: 'Job finished.' }] })
+  });
+
+  assert.equal(result.action, 'merge');
+  // reporting worker should be marked completed in the returned context
+  const reported = (result.context.workers || []).find(w => Number(w.index) === 1);
+  assert.equal(Boolean(reported && reported.completed), true);
+  // and the replacement secret should carry the stored result
+  assert.match(result.replacementSecretJson, /result-r1-w1.json/);
+  assert.equal(result.result.summary, 'Patch applied.');
 });
 
 test('processSessionWakeup records timeout outcomes when the prompt indicates a timeout', () => {

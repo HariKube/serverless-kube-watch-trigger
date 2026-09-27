@@ -801,8 +801,39 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     };
   }
 
-  const pendingLabel = Number.parseInt(secret.metadata?.labels?.['harikube.info/pending-subagents'] ?? '0', 10);
-  const pendingCount = Math.max(Number.isNaN(pendingLabel) ? 0 : pendingLabel - 1, 0);
+  // Derive pending state from authoritative sources: context.workers and existing result entries in the Secret
+  const workersArray = Array.isArray(context.workers) ? context.workers : [];
+  const existingResultKeys = Object.keys(secret.data || {}).filter(key => key.startsWith(`result-r${promptInfo.round}-w`));
+  const completedIndexes = new Set();
+
+  // mark workers already marked completed in context
+  for (const w of workersArray) {
+    const idx = Number(w?.index);
+    if (Number.isInteger(idx) && w?.completed) {
+      completedIndexes.add(idx);
+    }
+  }
+
+  // mark workers with existing result files in the Secret
+  for (const key of existingResultKeys) {
+    const m = key.match(/result-r\d+-w(\d+)\.json$/);
+    if (m) {
+      const idx = Number(m[1]);
+      if (Number.isInteger(idx)) {
+        completedIndexes.add(idx);
+      }
+    }
+  }
+
+  // include the current reporting worker as completed (we'll persist its result below)
+  completedIndexes.add(promptInfo.workerIndex);
+
+  // pending workers are those in context.workers whose index is not in completedIndexes
+  const pendingCount = workersArray.filter(w => {
+    const idx = Number(w?.index);
+    return Number.isInteger(idx) && !completedIndexes.has(idx);
+  }).length;
+
   const result = {
     round: promptInfo.round,
     index: promptInfo.workerIndex,
@@ -813,6 +844,7 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
 
   const updatedSecret = clone(secret);
   updatedSecret.metadata = updatedSecret.metadata || {};
+  // keep the Secret label as advisory but keep it synchronized to the derived pending count
   updatedSecret.metadata.labels = {
     ...(updatedSecret.metadata.labels || {}),
     'harikube.info/session': promptInfo.sessionId,
@@ -824,7 +856,22 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     [resultKey]: encodeJson(result)
   };
 
+  // persist the reporting worker's completion/result into the returned context.workers
   const updatedContext = clone(context);
+  updatedContext.workers = Array.isArray(updatedContext.workers)
+    ? updatedContext.workers.map(w => {
+        const idx = Number(w?.index);
+        if (Number.isInteger(idx) && idx === promptInfo.workerIndex) {
+          return {
+            ...w,
+            completed: true,
+            result: (result.summary || '').trim()
+          };
+        }
+        return w;
+      })
+    : updatedContext.workers;
+
   updatedContext.status = pendingCount === 0 ? 'merging' : 'hibernated';
   updatedContext.cleanup = cleanup;
   updatedSecret.data['context.json'] = encodeJson(updatedContext);
@@ -844,3 +891,4 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
         : `Session ${promptInfo.sessionId} round ${promptInfo.round}: worker ${promptInfo.workerIndex} recorded, ${pendingCount} pending`
   };
 }
+

@@ -82,7 +82,10 @@ const (
 	piTriggerAgentSkillsMountPath      = piTriggerAgentConfigMountPath + "/skills"
 )
 
-var piTriggerSessionTriggerNamePattern = regexp.MustCompile(`^pi-subagent-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
+var (
+	piTriggerSessionTriggerNamePattern   = regexp.MustCompile(`^pi-subagent-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
+	piTriggerSessionTriggerNamePatternV2 = regexp.MustCompile(`^pi-session-[0-9a-f]{8}-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
+)
 
 type piTriggerEventInput struct {
 	TriggerRefName    string                 `json:"triggerRefName"`
@@ -280,8 +283,24 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *PiTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.PiTrigger) (ctrl.Result, bool, error) {
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
-		if err := r.dispatchOwnerLeaseTimeoutJob(ctx, triggerRefName, trigger); err != nil {
-			logger.Error(err, "Trigger deletion timeout job dispatch failed")
+		// Prefer owner-lease timeout handling if an owner Lease reference exists
+		_, leaseExpired, leaseErr := r.expiredOwnerLeaseName(ctx, trigger, time.Now().UTC())
+		if leaseErr != nil {
+			logger.Error(leaseErr, "Failed to check for expired owner lease")
+		} else if leaseExpired {
+			// Existing behavior: dispatch owner-lease timed out job
+			if err := r.dispatchOwnerLeaseTimeoutJob(ctx, triggerRefName, trigger); err != nil {
+				logger.Error(err, "Trigger deletion timeout job dispatch failed")
+			}
+		} else {
+			// No expired owner lease; if the trigger session itself timed out, dispatch
+			// a session-timeout job so that cleanup can run with a DELETED payload.
+			sessionTimeout := trigger.Spec.Timeout.Duration
+			if sessionTimeout > 0 && time.Now().UTC().After(trigger.CreationTimestamp.Add(sessionTimeout)) {
+				if err := r.dispatchTriggerSessionTimeoutJob(ctx, triggerRefName, trigger); err != nil {
+					logger.Error(err, "Trigger deletion session-timeout job dispatch failed")
+				}
+			}
 		}
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
@@ -504,25 +523,75 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	}
 
 	recordRuntimeError := func(errorReason, errorResourceVersion string) {
-		patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
-		defer patchCancel()
+		const maxAttempts = 6
+		var lastErr error
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			// Stop retrying if the controller or session context is cancelled
+			if r.ctx.Err() != nil || ctx.Err() != nil {
+				return
+			}
 
-		latest := &triggersv1.PiTrigger{}
-		if err := r.Get(patchCtx, triggerKey, latest); err != nil {
-			return
-		}
-		if latest.Generation != trigger.Generation {
-			return
-		}
-		if latest.Status.Phase == triggersv1.TriggerPhaseError && latest.Status.ErrorReason == errorReason && latest.Status.ErrorResourceVersion == errorResourceVersion {
-			return
-		}
+			patchCtx, patchCancel := context.WithTimeout(r.ctx, time.Minute)
+			latest := &triggersv1.PiTrigger{}
+			if err := r.Get(patchCtx, triggerKey, latest); err != nil {
+				patchCancel()
+				// If the trigger was deleted, there's nothing to do.
+				if apierrors.IsNotFound(err) {
+					return
+				}
+				lastErr = err
+				logger.Error(err, "Trigger fetch failed while recording runtime error", "attempt", attempt)
+				// transient fetch error - retry after a short delay
+				select {
+				case <-time.After(time.Second):
+					continue
+				case <-ctx.Done():
+					return
+				}
+			}
+			patchCancel()
 
-		patched := latest.DeepCopy()
-		patched.Status.ErrorTime = metav1.Now()
-		patched.Status.ErrorReason = errorReason
-		patched.Status.ErrorResourceVersion = errorResourceVersion
-		_ = r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
+			if latest.Generation != trigger.Generation {
+				return
+			}
+			if latest.Status.Phase == triggersv1.TriggerPhaseError && latest.Status.ErrorReason == errorReason && latest.Status.ErrorResourceVersion == errorResourceVersion {
+				return
+			}
+
+			patched := latest.DeepCopy()
+			patched.Status.ErrorTime = metav1.Now()
+			patched.Status.ErrorReason = errorReason
+			patched.Status.ErrorResourceVersion = errorResourceVersion
+
+			patchCtx2, patchCancel2 := context.WithTimeout(r.ctx, time.Minute)
+			err := r.Status().Patch(patchCtx2, patched, client.MergeFrom(latest))
+			patchCancel2()
+			if err == nil {
+				return
+			}
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			lastErr = err
+			logger.Error(err, "Trigger status update failed while recording runtime error", "attempt", attempt)
+
+			// On transient errors (conflicts, etc.) retry with backoff
+			if attempt < maxAttempts-1 {
+				backoff := time.Second * time.Duration(1<<uint(attempt))
+				if backoff > 8*time.Second {
+					backoff = 8 * time.Second
+				}
+				select {
+				case <-time.After(backoff):
+					continue
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if lastErr != nil {
+			logger.Error(lastErr, "Giving up recording runtime error after retries")
+		}
 	}
 
 	logger.Info("Watcher started")
@@ -831,7 +900,32 @@ func (r *PiTriggerReconciler) createPiWorkerJob(ctx context.Context, triggerRefN
 			objectNamespace = namespace
 		}
 	}
-	nameHash := shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, rv}, "|"))
+	// For session wakeups we want stable one-shot resource names per session identity
+	// so repeated terminal events for the same session produce the same Job/ConfigMap names
+	// (and thus are deduplicated). Non-session dispatches remain resourceVersion-sensitive.
+	sessionID := strings.TrimSpace(trigger.GetLabels()[piTriggerSessionLabel])
+	round := strings.TrimSpace(trigger.GetLabels()[piTriggerRoundLabel])
+	workerIndex := strings.TrimSpace(trigger.GetLabels()[piTriggerWorkerLabel])
+	// If labels are missing, try parsing legacy or current session-style trigger name
+	if sessionID == "" || round == "" || workerIndex == "" {
+		if dsid, dr, dw, ok := parsePiTriggerSessionIdentity(trigger.Name); ok {
+			if sessionID == "" {
+				sessionID = dsid
+			}
+			if round == "" {
+				round = dr
+			}
+			if workerIndex == "" {
+				workerIndex = dw
+			}
+		}
+	}
+	var nameHash string
+	if sessionID != "" && round != "" && workerIndex != "" {
+		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, sessionID, round, workerIndex}, "|"))
+	} else {
+		nameHash = shortHash(strings.Join([]string{triggerRefName, eventPayload.EventType, objectNamespace, objectName, rv}, "|"))
+	}
 	jobName := buildPiTriggerResourceName(trigger.Name, nameHash, "job")
 	configMapName := buildPiTriggerResourceName(trigger.Name, nameHash, "input")
 	if eventPayload.Message != "" {
@@ -1096,11 +1190,16 @@ func buildPiTriggerWakeupPrompt(trigger *triggersv1.PiTrigger, jobName string) s
 }
 
 func parsePiTriggerSessionIdentity(triggerName string) (string, string, string, bool) {
-	matches := piTriggerSessionTriggerNamePattern.FindStringSubmatch(strings.TrimSpace(triggerName))
-	if len(matches) != 4 {
-		return "", "", "", false
+	trimmed := strings.TrimSpace(triggerName)
+	// Try the newer pi-session-<rand8>-<sessionId>-r<round>-w<worker>-trigger format first
+	if matches := piTriggerSessionTriggerNamePatternV2.FindStringSubmatch(trimmed); len(matches) == 4 {
+		return matches[1], matches[2], matches[3], true
 	}
-	return matches[1], matches[2], matches[3], true
+	// Fallback to legacy pi-subagent-<sessionId>-r<round>-w<worker>-trigger format
+	if matches := piTriggerSessionTriggerNamePattern.FindStringSubmatch(trimmed); len(matches) == 4 {
+		return matches[1], matches[2], matches[3], true
+	}
+	return "", "", "", false
 }
 
 func buildPiTriggerSpecSkill(triggerSpec triggersv1.PiTriggerSpec) (string, error) {

@@ -41,6 +41,38 @@ func TestBuildPiTriggerWorkerArgsDoesNotDisableSessions(t *testing.T) {
 	}
 }
 
+// drainPiTriggerRunningTriggers stops every running trigger and clears the registry without
+// invoking callback functions while holding the reconciler lock. It also waits
+// briefly for any running sessions to be removed.
+func drainPiTriggerRunningTriggers(r *PiTriggerReconciler) {
+	r.runningTriggersLock.Lock()
+	cancels := make([]func(), 0, len(r.runningTriggers))
+	for _, c := range r.runningTriggers {
+		cancels = append(cancels, c)
+	}
+	r.runningTriggers = map[string]func(){}
+	r.runningTriggersLock.Unlock()
+
+	for _, c := range cancels {
+		if c != nil {
+			c()
+		}
+	}
+
+	// allow a short window for any watcher goroutines to remove their session
+	// entries from runningTriggerSessions before tests tear down.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r.runningTriggersLock.Lock()
+		sessionsEmpty := len(r.runningTriggerSessions) == 0
+		r.runningTriggersLock.Unlock()
+		if sessionsEmpty || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func newPiReconciler() *PiTriggerReconciler {
 	r := &PiTriggerReconciler{
 		Client:              k8sClient,
@@ -55,12 +87,7 @@ func newPiReconciler() *PiTriggerReconciler {
 		triggerLocks:        map[string]*sync.Mutex{},
 	}
 	DeferCleanup(func() {
-		r.runningTriggersLock.Lock()
-		for _, c := range r.runningTriggers {
-			c()
-		}
-		r.runningTriggers = map[string]func(){}
-		r.runningTriggersLock.Unlock()
+		drainPiTriggerRunningTriggers(r)
 		sharedPiTriggerJobCounterRegistry.clear()
 	})
 	return r
@@ -1054,6 +1081,121 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Name))
 			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(nsn.String()))
 			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+		})
+
+		// Regression test: when a trigger has already exceeded spec.timeout before the first
+		// reconcile and is already in finalizer-protected deletion state, reconcile must
+		// dispatch a session-timeout worker job with a DELETED event payload/metadata instead
+		// of skipping dispatch.
+		It("dispatches a session timeout job for an already-expired, deleting trigger", func() {
+			const (
+				expiredTriggerName   = "pitrigger-expired-session-regression"
+				expiredSecretName    = "pitrigger-expired-agent-config"
+				expiredSessionSecret = "pitrigger-expired-session-secret"
+				expiredPromptsName   = "pitrigger-expired-prompts"
+				expiredSkillsName    = "pitrigger-expired-skills"
+			)
+
+			DeferCleanup(func() {
+				jobList := &batchv1.JobList{}
+				_ = k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: expiredTriggerName})
+				for i := range jobList.Items {
+					cleanupJob(bgCtx, jobList.Items[i].Name)
+					cleanupConfigMap(bgCtx, jobList.Items[i].Annotations[piTriggerInputConfigMapAnnotation])
+				}
+				cleanupConfigMap(bgCtx, expiredPromptsName)
+				cleanupConfigMap(bgCtx, expiredSkillsName)
+				cleanupPiTrigger(bgCtx, expiredTriggerName)
+				cleanupSecret(bgCtx, expiredSessionSecret)
+				cleanupSecret(bgCtx, expiredSecretName)
+			})
+
+			createPiAgentConfigSecret(bgCtx, expiredSecretName)
+			createPiAgentConfigSecret(bgCtx, expiredSessionSecret)
+			createPiAgentConfigMaps(bgCtx, expiredPromptsName, expiredSkillsName)
+
+			// create the trigger with a short timeout and an old creation timestamp so the
+			// session is already expired before reconcile runs. Keep a finalizer so the
+			// resource remains in a deleting state.
+			trigger := &triggersv1.PiTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       expiredTriggerName,
+					Namespace:  ns,
+					Finalizers: []string{"tests.harikube.io/cleanup"},
+					Labels: map[string]string{
+						piTriggerSessionLabel: "session-expired",
+						piTriggerRoundLabel:   "1",
+						piTriggerWorkerLabel:  "0",
+					},
+					Annotations:       map[string]string{piTriggerSessionSecretAnnotation: expiredSessionSecret},
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Minute)),
+				},
+				Spec: triggersv1.PiTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}},
+					Agent: triggersv1.PiAgentSpec{
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
+						ConfigSecretRef:     corev1.LocalObjectReference{Name: expiredSecretName},
+						PromptsConfigMapRef: corev1.LocalObjectReference{Name: expiredPromptsName},
+						SkillsConfigMapRef:  corev1.LocalObjectReference{Name: expiredSkillsName},
+						Timeout:             metav1.Duration{Duration: 1 * time.Second},
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			Expect(k8sClient.Delete(bgCtx, trigger)).To(Succeed())
+
+			nsn := types.NamespacedName{Name: expiredTriggerName, Namespace: ns}
+			Eventually(func() bool {
+				latest := &triggersv1.PiTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn, latest); err != nil {
+					return false
+				}
+				return latest.DeletionTimestamp != nil && !latest.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			r := newPiReconciler()
+
+			// Exercise the deletion-path logic using an in-memory trigger whose CreationTimestamp
+			// is explicitly old enough to exceed spec.timeout while keeping the persisted
+			// deleting/finalizer state in the API server for owner refs and cleanup.
+			latest := &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			inMem := latest.DeepCopy()
+			// ensure the in-memory trigger appears old enough to have its session timed out
+			inMem.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			// keep the DeletionTimestamp from the persisted object
+			inMem.DeletionTimestamp = latest.DeletionTimestamp
+
+			// Exercise the non-swallowing timeout helper directly for a deleting trigger
+			// using an in-memory copy so the test fails immediately on helper error.
+			err := r.dispatchTriggerSessionTimeoutJob(bgCtx, ns+"/"+expiredTriggerName, inMem)
+			Expect(err).NotTo(HaveOccurred())
+
+			jobList := &batchv1.JobList{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: expiredTriggerName})).To(Succeed())
+				g.Expect(jobList.Items).To(HaveLen(1))
+			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
+
+			job := jobList.Items[0]
+			inputConfigMapName := job.Annotations[piTriggerInputConfigMapAnnotation]
+			inputConfigMap := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: inputConfigMapName, Namespace: ns}, inputConfigMap)).To(Succeed())
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(`"eventType": "DELETED"`))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring("trigger session timed out"))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Name))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(nsn.String()))
+			Expect(inputConfigMap.Data["event.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring("trigger session timed out"))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Name))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(nsn.String()))
+			Expect(inputConfigMap.Data["metadata.json"]).To(ContainSubstring(job.Annotations[piTriggerResourceVersionAnnotation]))
+
+			// trigger must still be in deleting state and retain the finalizer so cleanup can proceed
+			latest = &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			Expect(latest.DeletionTimestamp).NotTo(BeNil())
+			Expect(latest.Finalizers).To(ContainElement("tests.harikube.io/cleanup"))
 		})
 	})
 
