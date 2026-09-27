@@ -160,6 +160,8 @@ spec:
               printf '%s\n' "$EVENT_OUTPUT" | grep 'status code is 500'
               exit 0
             fi
+            # Re-trigger the watched ConfigMap by making a small, bounded metadata change so the controller sees an event
+            kubectl patch configmap/failing-http-source -n http-trigger-failure --type=merge -p "{\"metadata\":{\"annotations\":{\"retrigger\":\"$(date +%s%N)\"}}}" >/dev/null 2>&1 || true
             sleep 2
           done
           echo "expected failure status or event not found"
