@@ -110,7 +110,7 @@ spec:
         duration: 5s
     - script:
         # Nginx access log must NOT contain any hits from the trigger.
-        content: "! kubectl logs -n default -l app=nginx-filter | grep 'Go-http-client/1.1'"
+        content: "! kubectl logs -n event-filter -l app=nginx-filter | grep 'Go-http-client/1.1'"
   - name: Create matching ConfigMap - should trigger webhook
     try:
     - apply:
@@ -122,10 +122,20 @@ spec:
             namespace: event-filter
             labels:
               watch-e2e-filter: "true"
-    - sleep:
-        duration: 5s
     - script:
-        content: kubectl logs -n event-filter -l app=nginx-filter | grep 'Go-http-client/1.1'
+        content: |-
+          # Poll nginx access logs for the webhook hit (user-agent Go-http-client/1.1)
+          # Retry a few times with short sleeps to avoid flakes.
+          for i in 1 2 3 4 5; do
+            if kubectl logs -n event-filter -l app=nginx-filter | grep -q 'Go-http-client/1.1'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERROR: webhook not received after polling" >&2
+          # Dump recent logs to aid debugging
+          kubectl logs -n event-filter -l app=nginx-filter >&2
+          exit 1
   - name: Cleanup test
     try:
     - delete:
