@@ -1483,11 +1483,17 @@ func validatePiAgentConfigRefs(ctx context.Context, getter kubeGetter, namespace
 	if strings.TrimSpace(agent.ConfigSecretRef.Name) == "" {
 		return errors.Join(ErrInvalidTriggerContent, errors.New("agent.configSecretRef.name is required"))
 	}
-	if strings.TrimSpace(agent.PromptsConfigMapRef.Name) == "" {
-		return errors.Join(ErrInvalidTriggerContent, errors.New("agent.promptsConfigMapRef.name is required"))
+
+	// PromptsConfigMapRef and SkillsConfigMapRef are optional pointers; only validate them if present.
+	if agent.PromptsConfigMapRef != nil {
+		if strings.TrimSpace(agent.PromptsConfigMapRef.Name) == "" {
+			return errors.Join(ErrInvalidTriggerContent, errors.New("agent.promptsConfigMapRef.name is required"))
+		}
 	}
-	if strings.TrimSpace(agent.SkillsConfigMapRef.Name) == "" {
-		return errors.Join(ErrInvalidTriggerContent, errors.New("agent.skillsConfigMapRef.name is required"))
+	if agent.SkillsConfigMapRef != nil {
+		if strings.TrimSpace(agent.SkillsConfigMapRef.Name) == "" {
+			return errors.Join(ErrInvalidTriggerContent, errors.New("agent.skillsConfigMapRef.name is required"))
+		}
 	}
 
 	secret := &corev1.Secret{}
@@ -1505,10 +1511,16 @@ func validatePiAgentConfigRefs(ctx context.Context, getter kubeGetter, namespace
 		}
 	}
 
-	for fieldName, configMapName := range map[string]string{
-		"agent.promptsConfigMapRef.name": agent.PromptsConfigMapRef.Name,
-		"agent.skillsConfigMapRef.name":  agent.SkillsConfigMapRef.Name,
-	} {
+	// Only attempt to look up ConfigMaps that were actually provided (non-nil refs).
+	refs := map[string]string{}
+	if agent.PromptsConfigMapRef != nil {
+		refs["agent.promptsConfigMapRef.name"] = agent.PromptsConfigMapRef.Name
+	}
+	if agent.SkillsConfigMapRef != nil {
+		refs["agent.skillsConfigMapRef.name"] = agent.SkillsConfigMapRef.Name
+	}
+
+	for fieldName, configMapName := range refs {
 		configMap := &corev1.ConfigMap{}
 		if err := getter.Get(ctx, client.ObjectKey{Namespace: namespace, Name: configMapName}, configMap); err != nil {
 			if apierrors.IsNotFound(err) {

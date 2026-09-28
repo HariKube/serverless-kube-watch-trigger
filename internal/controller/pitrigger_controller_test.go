@@ -13,25 +13,27 @@ import (
 	"testing"
 	"time"
 
-	coordinationv1 "k8s.io/api/coordination/v1"
-
 	"github.com/go-logr/logr"
+	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
 	batchv1 "k8s.io/api/batch/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
-	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
-	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func TestBuildPiTriggerWorkerArgsDoesNotDisableSessions(t *testing.T) {
@@ -92,6 +94,46 @@ func TestBuildRecoverablePiTriggerWorkerPromptIncludesWakeupAndPersistInstructio
 	}
 	if !strings.Contains(low, "non-zero") && !strings.Contains(low, "non zero") {
 		t.Fatalf("expected prompt to instruct non-zero exit on timeout/failure, got: %s", prompt)
+	}
+}
+
+func TestValidatePiAgentConfigRefs_AllowsNilOptionalConfigMaps(t *testing.T) {
+	ctx := context.Background()
+	secretName := "test-agent-config-nil"
+
+	// build a local fake controller-runtime client seeded with the required Secret
+	// so this plain testing.T run doesn't depend on the suite-global k8sClient
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 scheme: %v", err)
+	}
+	fakeClient := ctrlclientfake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+		Data: map[string][]byte{
+			"settings.json":     []byte(`{"provider":"test"}`),
+			"models.json":       []byte(`[]`),
+			"models-store.json": []byte(`{}`),
+			"auth.json":         []byte(`{}`),
+		},
+	}).Build()
+
+	agent := triggersv1.PiAgentSpec{
+		ConfigSecretRef:     corev1.LocalObjectReference{Name: secretName},
+		PromptsConfigMapRef: nil,
+		SkillsConfigMapRef:  nil,
+	}
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("validatePiAgentConfigRefs panicked: %v", r)
+			}
+		}()
+		err = validatePiAgentConfigRefs(ctx, fakeClient, "default", agent)
+	}()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 }
 
