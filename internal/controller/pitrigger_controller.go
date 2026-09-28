@@ -76,6 +76,7 @@ const (
 	piTriggerTimeoutDiagnosticsExtensionPath = "/root/.pi/agent/extensions/job-status.ts"
 	piTriggerServiceDiscoveryExtensionPath   = "/root/.pi/agent/extensions/kubernetes-service-discovery.ts"
 	piTriggerAgentSecretVolumeName           = "pi-agent-config"
+	piTriggerAgentConfigWritableVolumeName   = "pi-agent-config-home"
 	piTriggerPromptsVolumeName               = "pi-agent-prompts"
 	piTriggerSkillsVolumeName                = "pi-agent-skills"
 	piTriggerWorkerHomeDir                   = "/tmp/pi-home"
@@ -87,6 +88,7 @@ const (
 var (
 	piTriggerSessionTriggerNamePattern   = regexp.MustCompile(`^pi-subagent-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
 	piTriggerSessionTriggerNamePatternV2 = regexp.MustCompile(`^pi-session-[0-9a-f]{8}-(.+)-r([0-9]+)-w([0-9]+)-trigger$`)
+	piTriggerAgentConfigKeys             = []string{"settings.json", "models.json", "models-store.json", "auth.json"}
 )
 
 type piTriggerEventInput struct {
@@ -1152,12 +1154,20 @@ func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabel
 	if trigger != nil {
 		agentSecretName = trigger.Spec.Agent.ConfigSecretRef.Name
 	}
-	volumes := []corev1.Volume{{
-		Name: piTriggerAgentSecretVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{SecretName: agentSecretName},
+	volumes := []corev1.Volume{
+		{
+			Name: piTriggerAgentConfigWritableVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
 		},
-	}}
+		{
+			Name: piTriggerAgentSecretVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: agentSecretName},
+			},
+		},
+	}
 	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {
 		volumes = append(volumes, corev1.Volume{
 			Name: piTriggerPromptsVolumeName,
@@ -1176,10 +1186,17 @@ func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabel
 	}
 
 	mounts := []corev1.VolumeMount{{
-		Name:      piTriggerAgentSecretVolumeName,
+		Name:      piTriggerAgentConfigWritableVolumeName,
 		MountPath: piTriggerAgentConfigMountPath,
-		ReadOnly:  true,
 	}}
+	for _, key := range piTriggerAgentConfigKeys {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      piTriggerAgentSecretVolumeName,
+			MountPath: piTriggerAgentConfigMountPath + "/" + key,
+			SubPath:   key,
+			ReadOnly:  true,
+		})
+	}
 	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      piTriggerPromptsVolumeName,
@@ -1527,8 +1544,7 @@ func validatePiAgentConfigRefs(ctx context.Context, getter kubeGetter, namespace
 		return err
 	}
 
-	requiredKeys := []string{"settings.json", "models.json", "models-store.json", "auth.json"}
-	for _, key := range requiredKeys {
+	for _, key := range piTriggerAgentConfigKeys {
 		if _, ok := secret.Data[key]; !ok {
 			return errors.Join(ErrInvalidTriggerContent, fmt.Errorf("agent config secret %s/%s missing required key %q", namespace, agent.ConfigSecretRef.Name, key))
 		}

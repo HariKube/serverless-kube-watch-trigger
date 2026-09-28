@@ -12,9 +12,9 @@ test:
 	@node --test extensions/*.test.mjs
 
 test-e2e:
-	@docker run -it --rm \
+	@docker run --rm \
 		-e PI_OFFLINE=true \
 		-v $(HOME)/.pi/agent/auth.json:/root/.pi/agent/auth.json \
 		-v $(HOME)/.pi/agent/models-store.json:/root/.pi/agent/models-store.json \
 		-v $(HOME)/.pi/agent/settings.json:/root/.pi/agent/settings.json \
-		docker.io/mhmxs/pi-agent-empty:latest -p "hi"
+		$(IMG) -p "hi"

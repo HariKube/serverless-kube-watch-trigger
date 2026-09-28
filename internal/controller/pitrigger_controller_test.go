@@ -164,18 +164,55 @@ func TestAssemblePiWorkerJob_AllowsNilOptionalConfigMaps(t *testing.T) {
 		t.Fatalf("expected non-nil Job")
 	}
 
-	// when optional ConfigMap refs are nil, there should be no prompts/skills volumes or mounts
+	foundWritableConfigVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == piTriggerPromptsVolumeName || v.Name == piTriggerSkillsVolumeName {
 			t.Fatalf("did not expect prompts/skills volumes when refs are nil, found %s", v.Name)
 		}
+		if v.Name == piTriggerAgentConfigWritableVolumeName {
+			if v.EmptyDir == nil {
+				t.Fatalf("expected %s to be an EmptyDir volume", piTriggerAgentConfigWritableVolumeName)
+			}
+			foundWritableConfigVolume = true
+		}
+	}
+	if !foundWritableConfigVolume {
+		t.Fatalf("expected writable config volume %s", piTriggerAgentConfigWritableVolumeName)
 	}
 	if len(job.Spec.Template.Spec.Containers) == 0 {
 		t.Fatalf("expected at least one container in the Job")
 	}
-	for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+	container := job.Spec.Template.Spec.Containers[0]
+	foundWritableConfigMount := false
+	secretFileMounts := map[string]bool{}
+	for _, key := range piTriggerAgentConfigKeys {
+		secretFileMounts[key] = false
+	}
+	for _, m := range container.VolumeMounts {
 		if m.Name == piTriggerPromptsVolumeName || m.Name == piTriggerSkillsVolumeName {
 			t.Fatalf("did not expect prompts/skills volume mounts when refs are nil, found %s", m.Name)
+		}
+		if m.Name == piTriggerAgentConfigWritableVolumeName && m.MountPath == piTriggerAgentConfigMountPath {
+			foundWritableConfigMount = true
+		}
+		for _, key := range piTriggerAgentConfigKeys {
+			if m.Name == piTriggerAgentSecretVolumeName && m.MountPath == piTriggerAgentConfigMountPath+"/"+key {
+				if m.SubPath != key {
+					t.Fatalf("expected subPath %q for mount %q, got %q", key, m.MountPath, m.SubPath)
+				}
+				if !m.ReadOnly {
+					t.Fatalf("expected config secret mount %q to be read-only", m.MountPath)
+				}
+				secretFileMounts[key] = true
+			}
+		}
+	}
+	if !foundWritableConfigMount {
+		t.Fatalf("expected writable config mount at %s", piTriggerAgentConfigMountPath)
+	}
+	for key, found := range secretFileMounts {
+		if !found {
+			t.Fatalf("expected secret file mount for %s", key)
 		}
 	}
 }
@@ -848,13 +885,14 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(job.Spec.ActiveDeadlineSeconds).NotTo(BeNil())
 			Expect(*job.Spec.ActiveDeadlineSeconds).To(Equal(int64(420)))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("pi-agent-worker"))
-			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(3))
-			Expect(job.Spec.Template.Spec.Volumes[0].Secret).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[0].Secret.SecretName).To(Equal(secretName))
-			Expect(job.Spec.Template.Spec.Volumes[1].ConfigMap).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[1].ConfigMap.Name).To(Equal(promptsCMName))
+			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(4))
+			Expect(job.Spec.Template.Spec.Volumes[0].EmptyDir).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.Volumes[1].Secret).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.Volumes[1].Secret.SecretName).To(Equal(secretName))
 			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap).NotTo(BeNil())
-			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap.Name).To(Equal(skillsCMName))
+			Expect(job.Spec.Template.Spec.Volumes[2].ConfigMap.Name).To(Equal(promptsCMName))
+			Expect(job.Spec.Template.Spec.Volumes[3].ConfigMap).NotTo(BeNil())
+			Expect(job.Spec.Template.Spec.Volumes[3].ConfigMap.Name).To(Equal(skillsCMName))
 			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
 
 			container := job.Spec.Template.Spec.Containers[0]
@@ -878,7 +916,10 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(container.Args).To(ContainElement(piTriggerRuntimeExtensionPath))
 			Expect(container.Args).To(ContainElement(piTriggerTimeoutDiagnosticsExtensionPath))
 			Expect(container.Args).To(ContainElement(piTriggerServiceDiscoveryExtensionPath))
-			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentSecretVolumeName, MountPath: piTriggerAgentConfigMountPath, ReadOnly: true}))
+			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentConfigWritableVolumeName, MountPath: piTriggerAgentConfigMountPath}))
+			for _, key := range piTriggerAgentConfigKeys {
+				Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentSecretVolumeName, MountPath: piTriggerAgentConfigMountPath + "/" + key, SubPath: key, ReadOnly: true}))
+			}
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerPromptsVolumeName, MountPath: piTriggerAgentPromptsMountPath, ReadOnly: true}))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerSkillsVolumeName, MountPath: piTriggerAgentSkillsMountPath, ReadOnly: true}))
 

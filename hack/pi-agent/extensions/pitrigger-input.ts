@@ -7,6 +7,10 @@ const PI_SUBAGENT_DEFAULTS_ENV = 'PI_SUBAGENT_DEFAULTS_BASE64';
 const PI_TRIGGER_RUNTIME_SKILL = 'pi-trigger-runtime-input';
 const PI_SUBAGENT_DEFAULTS_RUNTIME_SKILL = 'pi-subagent-defaults-runtime';
 
+function hasNonEmptyEnv(envName: string) {
+  return Boolean(process.env[envName]?.trim());
+}
+
 function decodeBase64Object(envName: string, requiredKeys: string[]) {
   const encoded = process.env[envName]?.trim();
   if (!encoded) {
@@ -85,7 +89,7 @@ Treat the structured JSON below as the canonical starting \`subAgentDefaults\` o
 - Do not rewrite \`agent\` by hand unless the task explicitly requires changing worker runtime settings.
 - Prefer the higher-level orchestration tools over low-level helpers such as \`prepare_session_hibernation\` unless you are debugging the hibernation planner itself.
 - Treat the environment variable itself as an implementation detail; rely on this decoded skill content instead of re-decoding it.
-- Do not wait for user clarification or prompt for interactive input; if the worker is blocked or uncertain it must call the `decision_maker` tool, then continue executing according to that decision and keep working autonomously until the task is solved or the job reaches `TIMED_OUT`.
+- Do not wait for user clarification or prompt for interactive input; if the worker is blocked or uncertain it must call the \`decision_maker\` tool, then continue executing according to that decision and keep working autonomously until the task is solved or the job reaches \`TIMED_OUT\`.
 
 ## Canonical sub-agent defaults
 
@@ -107,6 +111,16 @@ function writeSkill(rootDir: string, skillName: string, content: string) {
 }
 
 export default function registerPiTriggerInput(pi: any) {
+  if (!hasNonEmptyEnv(PI_TRIGGER_INPUT_ENV) && !hasNonEmptyEnv(PI_SUBAGENT_DEFAULTS_ENV)) {
+    return;
+  }
+
+  if (!hasNonEmptyEnv(PI_TRIGGER_INPUT_ENV) || !hasNonEmptyEnv(PI_SUBAGENT_DEFAULTS_ENV)) {
+    throw new Error(
+      `${PI_TRIGGER_INPUT_ENV} and ${PI_SUBAGENT_DEFAULTS_ENV} must both be set when enabling the PiTrigger runtime extension`
+    );
+  }
+
   const input = decodeBase64Object(PI_TRIGGER_INPUT_ENV, ['payload', 'metadata']);
   const subAgentDefaults = decodeBase64Object(PI_SUBAGENT_DEFAULTS_ENV, ['agent']);
 
