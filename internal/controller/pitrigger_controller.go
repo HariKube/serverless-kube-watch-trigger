@@ -1147,6 +1147,50 @@ func buildPiWorkerLabelsAndAnnotations(trigger *triggersv1.PiTrigger, traceID, s
 
 // assemblePiWorkerJob constructs the Job object from pieces
 func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabels, podLabels, jobAnnotations map[string]string, workerArgs []string, env []corev1.EnvVar, activeDeadlineSeconds *int64, ttlSecondsAfterFinished *int32) *batchv1.Job {
+	// Build volumes and mounts: always include the required agent Secret, add optional ConfigMaps only when refs are provided
+	volumes := []corev1.Volume{{
+		Name: piTriggerAgentSecretVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: trigger.Spec.Agent.ConfigSecretRef.Name},
+		},
+	}}
+	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: piTriggerPromptsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: trigger.Spec.Agent.PromptsConfigMapRef.Name}},
+			},
+		})
+	}
+	if trigger != nil && trigger.Spec.Agent.SkillsConfigMapRef != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: piTriggerSkillsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: trigger.Spec.Agent.SkillsConfigMapRef.Name}},
+			},
+		})
+	}
+
+	mounts := []corev1.VolumeMount{{
+		Name:      piTriggerAgentSecretVolumeName,
+		MountPath: piTriggerAgentConfigMountPath,
+		ReadOnly:  true,
+	}}
+	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      piTriggerPromptsVolumeName,
+			MountPath: piTriggerAgentPromptsMountPath,
+			ReadOnly:  true,
+		})
+	}
+	if trigger != nil && trigger.Spec.Agent.SkillsConfigMapRef != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      piTriggerSkillsVolumeName,
+			MountPath: piTriggerAgentSkillsMountPath,
+			ReadOnly:  true,
+		})
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        jobName,
@@ -1165,22 +1209,8 @@ func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabel
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: trigger.Spec.Agent.ServiceAccountName,
-					Volumes: []corev1.Volume{{
-						Name: piTriggerAgentSecretVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{SecretName: trigger.Spec.Agent.ConfigSecretRef.Name},
-						},
-					}, {
-						Name: piTriggerPromptsVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: trigger.Spec.Agent.PromptsConfigMapRef.Name}},
-						},
-					}, {
-						Name: piTriggerSkillsVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: trigger.Spec.Agent.SkillsConfigMapRef.Name}},
-						},
-					}},
+					// Volumes: always include the agent Secret, add optional ConfigMaps only when refs are provided
+					Volumes: volumes,
 					Containers: []corev1.Container{{
 						Name:            piTriggerWorkerContainerName,
 						Image:           trigger.Spec.Agent.Image,
@@ -1190,19 +1220,8 @@ func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabel
 						Env:             env,
 						EnvFrom:         trigger.Spec.Agent.EnvFrom,
 						Resources:       trigger.Spec.Agent.Resources,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      piTriggerAgentSecretVolumeName,
-							MountPath: piTriggerAgentConfigMountPath,
-							ReadOnly:  true,
-						}, {
-							Name:      piTriggerPromptsVolumeName,
-							MountPath: piTriggerAgentPromptsMountPath,
-							ReadOnly:  true,
-						}, {
-							Name:      piTriggerSkillsVolumeName,
-							MountPath: piTriggerAgentSkillsMountPath,
-							ReadOnly:  true,
-						}},
+						// Mounts: match the volumes explicitly
+						VolumeMounts: mounts,
 					}},
 				},
 			},

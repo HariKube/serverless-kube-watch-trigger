@@ -137,6 +137,49 @@ func TestValidatePiAgentConfigRefs_AllowsNilOptionalConfigMaps(t *testing.T) {
 	}
 }
 
+func TestAssemblePiWorkerJob_AllowsNilOptionalConfigMaps(t *testing.T) {
+	trigger := &triggersv1.PiTrigger{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-assemble-nil", Namespace: "default"},
+		Spec: triggersv1.PiTriggerSpec{
+			Agent: triggersv1.PiAgentSpec{
+				Image:               "docker.io/test/pi-agent:latest",
+				ConfigSecretRef:     corev1.LocalObjectReference{Name: "agent-config"},
+				PromptsConfigMapRef: nil,
+				SkillsConfigMapRef:  nil,
+			},
+		},
+	}
+
+	var job *batchv1.Job
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("assemblePiWorkerJob panicked: %v", r)
+			}
+		}()
+		job = assemblePiWorkerJob(trigger, "job-name", map[string]string{"k": "v"}, map[string]string{"pk": "pv"}, map[string]string{"a": "b"}, []string{"arg"}, []corev1.EnvVar{}, nil, nil)
+	}()
+
+	if job == nil {
+		t.Fatalf("expected non-nil Job")
+	}
+
+	// when optional ConfigMap refs are nil, there should be no prompts/skills volumes or mounts
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == piTriggerPromptsVolumeName || v.Name == piTriggerSkillsVolumeName {
+			t.Fatalf("did not expect prompts/skills volumes when refs are nil, found %s", v.Name)
+		}
+	}
+	if len(job.Spec.Template.Spec.Containers) == 0 {
+		t.Fatalf("expected at least one container in the Job")
+	}
+	for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == piTriggerPromptsVolumeName || m.Name == piTriggerSkillsVolumeName {
+			t.Fatalf("did not expect prompts/skills volume mounts when refs are nil, found %s", m.Name)
+		}
+	}
+}
+
 func findEnvVar(container corev1.Container, name string) (string, bool) {
 	for _, env := range container.Env {
 		if env.Name == name {
