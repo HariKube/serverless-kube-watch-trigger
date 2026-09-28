@@ -274,6 +274,10 @@ spec:
                     description: NoExtensions disables loading ambient pi extensions
                       for the spawned worker Job.
                     type: boolean
+                  prompt:
+                    description: Prompt prefixes the spawned worker prompt used by
+                      the Job.
+                    type: string
                   promptsConfigMapRef:
                     description: PromptsConfigMapRef references the ConfigMap mounted
                       into ~/.pi/agent/prompts.

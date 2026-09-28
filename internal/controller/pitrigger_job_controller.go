@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -56,7 +58,9 @@ func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	sharedPiTriggerJobCounterRegistry.get(job.Namespace + "/" + triggerName).releaseTerminalJob(job)
+	// update running job counts for the owning trigger
+	triggerRef := job.Namespace + "/" + triggerName
+	sharedPiTriggerJobCounterRegistry.get(triggerRef).releaseTerminalJob(job)
 
 	trigger := &triggersv1.PiTrigger{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: job.Namespace, Name: triggerName}, trigger); err != nil {
@@ -67,6 +71,7 @@ func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if failed {
+		// preserve existing status patch behaviour
 		latest := trigger.DeepCopy()
 		updated := latest.DeepCopy()
 		newErrorReason := fmt.Sprintf("pi worker job %s failed: %s", job.Name, reason)
@@ -83,6 +88,32 @@ func (r *PiTriggerJobReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				logger.Error(err, "Trigger status update failed")
 				return ctrl.Result{}, err
 			}
+		}
+
+		// classify reason into a small-cardinality label for metrics
+		stableReason := classifyPiJobFailureReason(reason)
+
+		// emit terminal metric (duration unknown here so record zero)
+		recordPiTriggerJobTerminal(triggerRef, "error", stableReason, 0)
+		// emit requeue metric
+		recordPiTriggerJobRequeue(triggerRef, stableReason)
+
+		// force a metadata change on the owning PiTrigger so its controller
+		// observes the event and can perform recovery processing; this keeps
+		// the status-based recovery flow intact while ensuring the trigger
+		// controller is requeued.
+		metaLatest := trigger.DeepCopy()
+		metaUpdated := metaLatest.DeepCopy()
+		if metaUpdated.Annotations == nil {
+			metaUpdated.Annotations = map[string]string{}
+		}
+		metaUpdated.Annotations["triggers.harikube.info/worker-failed-requeue"] = time.Now().UTC().Format(time.RFC3339Nano)
+		if err := r.Patch(ctx, metaUpdated, client.MergeFrom(metaLatest)); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, nil
+			}
+			logger.Error(err, "Trigger metadata update (requeue) failed")
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -106,6 +137,26 @@ func derivePiJobResult(job *batchv1.Job) (failed bool, terminal bool, reason str
 		}
 	}
 	return false, false, ""
+}
+
+// classifyPiJobFailureReason maps raw job failure messages/reasons to a
+// small-cardinality stable label used for metrics and requeue classification.
+// Keep this conservative to avoid label cardinality explosions.
+func classifyPiJobFailureReason(raw string) string {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	if lower == "" {
+		return "error"
+	}
+	if strings.Contains(lower, "deadlinexceeded") || strings.Contains(lower, "deadline") || strings.Contains(lower, "timeout") {
+		return "timeout"
+	}
+	if strings.Contains(lower, "backofflimit") || strings.Contains(lower, "backoff") || strings.Contains(lower, "retries") {
+		return "retries"
+	}
+	if strings.Contains(lower, "oom") || strings.Contains(lower, "outofmemory") || strings.Contains(lower, "oomkill") {
+		return "oom"
+	}
+	return "error"
 }
 
 func (r *PiTriggerJobReconciler) SetupWithManager(mgr ctrl.Manager) error {

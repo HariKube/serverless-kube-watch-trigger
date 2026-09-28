@@ -85,6 +85,8 @@ spec:
                 name: pi-agent-prompts
               skillsConfigMapRef:
                 name: pi-agent-skills
+              # Provide a custom prompt prefix to verify the controller forwards it via -p
+              prompt: "E2E-TEST-PROMPT: please prefix this payload"
               workingDir: /
               noExtensions: true
               backoffLimit: 0
@@ -129,7 +131,8 @@ spec:
             if [ -n "$JOB_NAME" ] \
               && [ -n "$POD_NAME" ] \
               && ! printf '%s' "$JOB_ARGS" | grep -q -- '--no-session' \
-              && printf '%s' "$JOB_ARGS" | grep -q -- '--mode'; then
+              && printf '%s' "$JOB_ARGS" | grep -q -- '--mode' \
+              && printf '%s' "$JOB_ARGS" | grep -q -- 'E2E-TEST-PROMPT'; then
               kubectl get pitrigger pi-trigger-simple -n pi-trigger-simple -o yaml
               kubectl get job "$JOB_NAME" -n pi-trigger-simple -o yaml
               kubectl get pod "$POD_NAME" -n pi-trigger-simple -o yaml

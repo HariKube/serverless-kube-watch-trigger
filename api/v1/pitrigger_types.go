@@ -34,11 +34,11 @@ type PiAgentSpec struct {
 
 	// +kubebuilder:validation:Required
 	// PromptsConfigMapRef references the ConfigMap mounted into ~/.pi/agent/prompts.
-	PromptsConfigMapRef corev1.LocalObjectReference `json:"promptsConfigMapRef"`
+	PromptsConfigMapRef *corev1.LocalObjectReference `json:"promptsConfigMapRef"`
 
 	// +kubebuilder:validation:Required
 	// SkillsConfigMapRef references the ConfigMap mounted into ~/.pi/agent/skills.
-	SkillsConfigMapRef corev1.LocalObjectReference `json:"skillsConfigMapRef"`
+	SkillsConfigMapRef *corev1.LocalObjectReference `json:"skillsConfigMapRef"`
 
 	// +kubebuilder:validation:Optional
 	// Provider selects the pi provider used by the spawned worker Job.
@@ -47,6 +47,10 @@ type PiAgentSpec struct {
 	// +kubebuilder:validation:Optional
 	// Model selects the pi model used by the spawned worker Job.
 	Model string `json:"model,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Prompt prefixes the spawned worker prompt used by the Job.
+	Prompt string `json:"prompt,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// WorkingDir is the working directory used by the spawned worker Job.

@@ -59,27 +59,29 @@ import (
 )
 
 const (
-	piTriggerManagedLabel              = "triggers.harikube.info/pitrigger-job"
-	piTriggerTriggerNameLabel          = "triggers.harikube.info/pitrigger-name"
-	piTriggerEventTypeAnnotation       = "triggers.harikube.info/event-type"
-	piTriggerResourceVersionAnnotation = "triggers.harikube.info/resource-version"
-	piTriggerSessionLabel              = "harikube.info/session"
-	piTriggerRoundLabel                = "harikube.info/round"
-	piTriggerWorkerLabel               = "harikube.info/worker"
-	piTriggerTraceIDLabel              = "harikube.info/trace-id"
-	piTriggerSessionSecretAnnotation   = "harikube.info/session-secret"
-	piTriggerOutputLocationAnnotation  = "harikube.info/output-location"
-	piTriggerWorkerContainerName       = "pi-agent"
-	piTriggerWorkerInputEnvVar         = "PI_TRIGGER_INPUT_BASE64"
-	piTriggerSubAgentDefaultsEnvVar    = "PI_SUBAGENT_DEFAULTS_BASE64"
-	piTriggerRuntimeExtensionPath      = "/root/.pi/agent/extensions/pitrigger-input.ts"
-	piTriggerAgentSecretVolumeName     = "pi-agent-config"
-	piTriggerPromptsVolumeName         = "pi-agent-prompts"
-	piTriggerSkillsVolumeName          = "pi-agent-skills"
-	piTriggerWorkerHomeDir             = "/tmp/pi-home"
-	piTriggerAgentConfigMountPath      = piTriggerWorkerHomeDir + "/.pi/agent"
-	piTriggerAgentPromptsMountPath     = piTriggerAgentConfigMountPath + "/prompts"
-	piTriggerAgentSkillsMountPath      = piTriggerAgentConfigMountPath + "/skills"
+	piTriggerManagedLabel                    = "triggers.harikube.info/pitrigger-job"
+	piTriggerTriggerNameLabel                = "triggers.harikube.info/pitrigger-name"
+	piTriggerEventTypeAnnotation             = "triggers.harikube.info/event-type"
+	piTriggerResourceVersionAnnotation       = "triggers.harikube.info/resource-version"
+	piTriggerSessionLabel                    = "harikube.info/session"
+	piTriggerRoundLabel                      = "harikube.info/round"
+	piTriggerWorkerLabel                     = "harikube.info/worker"
+	piTriggerTraceIDLabel                    = "harikube.info/trace-id"
+	piTriggerSessionSecretAnnotation         = "harikube.info/session-secret"
+	piTriggerOutputLocationAnnotation        = "harikube.info/output-location"
+	piTriggerWorkerContainerName             = "pi-agent"
+	piTriggerWorkerInputEnvVar               = "PI_TRIGGER_INPUT_BASE64"
+	piTriggerSubAgentDefaultsEnvVar          = "PI_SUBAGENT_DEFAULTS_BASE64"
+	piTriggerRuntimeExtensionPath            = "/root/.pi/agent/extensions/pitrigger-input.ts"
+	piTriggerTimeoutDiagnosticsExtensionPath = "/root/.pi/agent/extensions/job-status.ts"
+	piTriggerServiceDiscoveryExtensionPath   = "/root/.pi/agent/extensions/kubernetes-service-discovery.ts"
+	piTriggerAgentSecretVolumeName           = "pi-agent-config"
+	piTriggerPromptsVolumeName               = "pi-agent-prompts"
+	piTriggerSkillsVolumeName                = "pi-agent-skills"
+	piTriggerWorkerHomeDir                   = "/tmp/pi-home"
+	piTriggerAgentConfigMountPath            = piTriggerWorkerHomeDir + "/.pi/agent"
+	piTriggerAgentPromptsMountPath           = piTriggerAgentConfigMountPath + "/prompts"
+	piTriggerAgentSkillsMountPath            = piTriggerAgentConfigMountPath + "/skills"
 )
 
 var (
@@ -117,8 +119,8 @@ type piTriggerJobMetadata struct {
 }
 
 type piTriggerRuntimeInput struct {
-	Event    piTriggerEventInput  `json:"event"`
-	Metadata piTriggerJobMetadata `json:"metadata"`
+	Payload  map[string]interface{} `json:"payload"`
+	Metadata piTriggerJobMetadata   `json:"metadata"`
 }
 
 type piTriggerSubAgentDefaults struct {
@@ -128,7 +130,9 @@ type piTriggerSubAgentDefaults struct {
 }
 
 type piTriggerSession struct {
-	stop func()
+	stop             func()
+	sessionLease     triggerSessionLease
+	leaseRenewerDone chan struct{}
 }
 
 // PiTriggerReconciler reconciles a PiTrigger object.
@@ -168,36 +172,40 @@ func (r *PiTriggerReconciler) triggerLock(triggerRefName string) *sync.Mutex {
 
 func (r *PiTriggerReconciler) stopRunningTrigger(triggerRefName string) {
 	r.runningTriggersLock.Lock()
-	defer r.runningTriggersLock.Unlock()
+	stopFn := r.detachRunningTriggerLocked(triggerRefName)
+	r.runningTriggersLock.Unlock()
 
-	r.stopRunningTriggerLocked(triggerRefName)
+	if stopFn != nil {
+		stopFn()
+	}
 }
 
-func (r *PiTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) {
-	stopped := false
+func (r *PiTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) func() {
+	var stopFn func()
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
-		cancel()
-		stopped = true
+		stopFn = cancel
 	}
-	if session, ok := r.runningTriggerSessions[triggerRefName]; ok && session != nil {
-		session.stop()
-		stopped = true
+	if stopFn == nil {
+		if session, ok := r.runningTriggerSessions[triggerRefName]; ok && session != nil {
+			stopFn = session.stop
+		}
 	}
 	delete(r.runningTriggers, triggerRefName)
 	delete(r.runningTriggerSessions, triggerRefName)
-	if stopped {
+	if stopFn != nil {
 		recordControllerSessionStop(metricControllerPiTrigger)
 	}
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.UnregisterTask(triggerRefName)
 	}
+	return stopFn
 }
 
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;list;watch
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
 
@@ -225,27 +233,36 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	if result, done, err := r.preflightReconcile(ctx, logger, triggerRefName, &trigger); done || err != nil {
-		return result, err
+	if done, err := r.preflightReconcile(ctx, logger, triggerRefName, &trigger); done || err != nil {
+		return ctrl.Result{}, err
 	}
 
-	leaseAcquired, result, err := r.acquireReconcileLease(ctx, logger, &trigger)
-	if err != nil || result != nil {
-		if result == nil {
-			return ctrl.Result{}, err
-		}
-		return *result, err
+	// Opt-in per-trigger reconcile lease (spec.lockDuration). It is claimed
+	// before the running session is torn down so a trigger whose lease is held
+	// by another replica keeps its current session instead of going dark until
+	// the requeue fires.
+	annotationLeaseAcquired, annotationLeaseRequeue, err := acquireAnnotationLease(
+		ctx,
+		logger,
+		r.Client,
+		&trigger,
+		trigger.Spec.LockDuration.Duration,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-
-	taskSucceeded := false
-	if leaseAcquired {
+	if annotationLeaseRequeue != nil {
+		return *annotationLeaseRequeue, nil
+	}
+	triggerSettled := false
+	if annotationLeaseAcquired {
 		defer func() {
-			if !taskSucceeded {
+			// A failed reconcile keeps the lease so the next attempt (or the
+			// requeue that follows) still observes an exclusive claim.
+			if !triggerSettled {
 				return
 			}
-			if err := lease.ClearLease(ctx, r.Client, &trigger); err != nil {
-				logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
-			}
+			_ = releaseAnnotationLease(ctx, logger, r.Client, &trigger)
 		}()
 	}
 
@@ -255,7 +272,8 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
 
-	if err := r.createTrigger(triggerRefName, &trigger); err != nil {
+	createResult, err := r.createTrigger(ctx, logger, triggerRefName, &trigger)
+	if err != nil {
 		permanent := errors.Is(err, ErrInvalidTriggerContent)
 		if !permanent {
 			logger.Error(err, "Trigger initialization failed")
@@ -279,6 +297,9 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, err
 	}
+	if createResult != nil {
+		return *createResult, nil
+	}
 
 	patchedTrigger.Status.Phase = triggersv1.TriggerPhaseRunning
 	if !recoveryRestart {
@@ -294,12 +315,12 @@ func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(err, "Trigger status update failed")
 		return ctrl.Result{}, err
 	}
+	triggerSettled = true
 
-	taskSucceeded = true
 	return ctrl.Result{}, nil
 }
 
-func (r *PiTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.PiTrigger) (ctrl.Result, bool, error) {
+func (r *PiTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.PiTrigger) (bool, error) {
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
 		// Prefer owner-lease timeout handling if an owner Lease reference exists
@@ -324,76 +345,127 @@ func (r *PiTriggerReconciler) preflightReconcile(ctx context.Context, logger log
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
 		sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
-		return ctrl.Result{}, true, nil
+		return true, nil
 	}
 	if r.PartitionController != nil && !r.PartitionController.OwnsObject(trigger) {
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
 		sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
-		return ctrl.Result{}, true, nil
+		return true, nil
+	}
+	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning {
+		if err := r.clearExpiredAnnotationLease(ctx, logger, trigger); err != nil {
+			return true, err
+		}
+		if trigger.Status.LastGeneration == trigger.Generation {
+			return true, nil
+		}
 	}
 	if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
-		return ctrl.Result{}, false, nil
-	}
-	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning && trigger.Status.LastGeneration == trigger.Generation {
-		result, err := r.handleRunningTriggerLease(ctx, logger, trigger)
-		return result, true, err
+		return false, nil
 	}
 
 	logger.Info("Trigger updated")
-	return ctrl.Result{}, false, nil
+	return false, nil
 }
 
-func (r *PiTriggerReconciler) handleRunningTriggerLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.PiTrigger) (ctrl.Result, error) {
-	lockDuration := trigger.Spec.LockDuration.Duration
-	if lockDuration <= 0 {
-		return ctrl.Result{}, nil
-	}
-	if requeueAfter := lease.ActiveLeaseRemaining(trigger, time.Now().UTC(), lockDuration); requeueAfter > 0 {
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	}
-	if _, ok := trigger.GetAnnotations()[lease.AnnotationKey]; !ok {
-		return ctrl.Result{}, nil
-	}
-	if err := lease.ClearLease(ctx, r.Client, trigger); err != nil {
-		logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *PiTriggerReconciler) acquireReconcileLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.PiTrigger) (bool, *ctrl.Result, error) {
-	lockDuration := trigger.Spec.LockDuration.Duration
-	if lockDuration <= 0 {
-		return false, nil, nil
-	}
-
-	leaseResult, err := lease.TryAcquireLease(ctx, r.Client, trigger, time.Now().UTC(), lockDuration)
-	if err != nil {
-		logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
-		return false, nil, err
-	}
-	if leaseResult.RequeueAfter > 0 {
-		logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
-		return false, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
-	}
-	if leaseResult.Conflict {
-		retryAfter := lease.ConflictRetryDelay()
-		logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
-		return false, &ctrl.Result{RequeueAfter: retryAfter}, nil
-	}
-	return leaseResult.Acquired, nil, nil
+// clearExpiredAnnotationLease removes an annotation lease that a previous
+// reconcile left behind. A lease that is still valid is left in place so a
+// replica that is mid-reconcile keeps its claim, and the current reconcile
+// requeues on it instead of racing ahead.
+func (r *PiTriggerReconciler) clearExpiredAnnotationLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.PiTrigger) error {
+	return clearExpiredAnnotationLease(ctx, logger, r.Client, trigger, trigger.Spec.LockDuration.Duration)
 }
 
 //nolint:gocyclo
-func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.PiTrigger) error {
+func (r *PiTriggerReconciler) acquireSessionLease(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.PiTrigger) (triggerSessionLease, *ctrl.Result, error) {
+	sessionLease := newTriggerSessionLease("pitrigger", trigger, triggerRefName, trigger.Spec.LockDuration.Duration)
+	leaseResult, err := lease.TryAcquireCoordinationLease(
+		ctx,
+		r.Client,
+		client.ObjectKey{Namespace: sessionLease.namespace, Name: sessionLease.name},
+		sessionLease.holderIdentity,
+		time.Now().UTC(),
+		sessionLease.duration,
+	)
+	if err != nil {
+		logger.Error(err, "Trigger session lease acquisition failed", "lease", sessionLease.name)
+		return triggerSessionLease{}, nil, err
+	}
+	if leaseResult.RequeueAfter > 0 {
+		logger.V(1).Info("Trigger session lease is held by another replica, requeueing", "lease", sessionLease.name, "requeueAfter", leaseResult.RequeueAfter.String())
+		return triggerSessionLease{}, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
+	}
+	return sessionLease, nil, nil
+}
+
+func (r *PiTriggerReconciler) startSessionLeaseRenewer(ctx context.Context, logger logr.Logger, triggerRefName string, session *piTriggerSession) {
+	if session == nil {
+		return
+	}
+	renewEvery := session.sessionLease.duration / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	go func() {
+		if session.leaseRenewerDone != nil {
+			defer close(session.leaseRenewerDone)
+		}
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if ctx.Err() != nil {
+				return
+			}
+
+			renewed, err := lease.RenewCoordinationLease(
+				ctx,
+				r.Client,
+				client.ObjectKey{Namespace: session.sessionLease.namespace, Name: session.sessionLease.name},
+				session.sessionLease.holderIdentity,
+				time.Now().UTC(),
+				session.sessionLease.duration,
+			)
+			if ctx.Err() != nil {
+				return
+			}
+			if err == nil && renewed {
+				continue
+			}
+			if err != nil {
+				logger.Error(err, "Trigger session lease renew failed", "lease", session.sessionLease.name)
+			} else {
+				logger.Info("Trigger session lease lost; stopping watcher session", "lease", session.sessionLease.name)
+			}
+
+			r.runningTriggersLock.Lock()
+			var stopFn func()
+			if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
+				stopFn = r.detachRunningTriggerLocked(triggerRefName)
+			}
+			r.runningTriggersLock.Unlock()
+			if stopFn != nil {
+				stopFn()
+			}
+			return
+		}
+	}()
+}
+
+//nolint:gocyclo
+func (r *PiTriggerReconciler) createTrigger(reconcileCtx context.Context, reconcileLogger logr.Logger, triggerRefName string, trigger *triggersv1.PiTrigger) (*ctrl.Result, error) {
 	resourceVersion := triggerResourceVersion(trigger.Status.ErrorResourceVersion)
 	if trigger.ResourceVersion != "" && natsort.Compare(resourceVersion, trigger.ResourceVersion) {
 		resourceVersion = trigger.ResourceVersion
 	}
 	if latestJobResourceVersion, err := r.latestDispatchedResourceVersion(r.ctx, trigger); err != nil {
-		return err
+		return nil, err
 	} else if latestJobResourceVersion != "" && natsort.Compare(resourceVersion, latestJobResourceVersion) {
 		resourceVersion = latestJobResourceVersion
 	}
@@ -403,7 +475,7 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	compiledTemplates := map[string]*template.Template{}
 	if trigger.Spec.EventFilter != "" {
 		if err := addCompiledTemplate(compiledTemplates, filterTemplateName, fmt.Sprintf("{{if %s}}true{{end}}", trigger.Spec.EventFilter), nil); err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse filter template"))
+			return nil, errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse filter template"))
 		}
 	}
 
@@ -411,18 +483,23 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	defer depFetchCancel()
 
 	if err := validatePiAgentConfigRefs(depFetchCtx, r, trigger.Namespace, trigger.Spec.Agent); err != nil {
-		return err
+		return nil, err
 	}
 
 	concurrency := normalizeConcurrency(trigger.Spec.Concurrency)
 	resourceClient, err := getWatcherResourceClient(depFetchCtx, r, trigger.Namespace, r.DynamicClient.Resource(gvr), trigger.Spec.WatcherKubeconfigSecret, gvr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
 	deliveryGate := r.get(triggerRefName)
 	jobCounter := sharedPiTriggerJobCounterRegistry.get(triggerRefName)
 	maxJobs := int(trigger.Spec.MaxJobs)
+
+	sessionLease, result, err := r.acquireSessionLease(reconcileCtx, reconcileLogger, triggerRefName, trigger)
+	if err != nil || result != nil {
+		return result, err
+	}
 
 	sessionTimeout := trigger.Spec.Timeout.Duration
 	sessionCtx, sessionCancel := context.WithCancel(r.ctx)
@@ -433,6 +510,7 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 		ctx, timeoutCancel = context.WithTimeout(sessionCtx, remainingTimeout)
 	}
 
+	var session *piTriggerSession
 	var stopSessionOnce sync.Once
 	stopSession := func() {
 		stopSessionOnce.Do(func() {
@@ -440,10 +518,26 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 				timeoutCancel()
 			}
 			sessionCancel()
+			if session != nil && session.leaseRenewerDone != nil {
+				select {
+				case <-session.leaseRenewerDone:
+				case <-time.After(2 * time.Second):
+				}
+			}
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer releaseCancel()
+			if err := lease.ReleaseCoordinationLease(
+				releaseCtx,
+				r.Client,
+				client.ObjectKey{Namespace: sessionLease.namespace, Name: sessionLease.name},
+				sessionLease.holderIdentity,
+			); err != nil {
+				reconcileLogger.Error(err, "Trigger session lease release failed", "lease", sessionLease.name)
+			}
 		})
 	}
 
-	session := &piTriggerSession{stop: stopSession}
+	session = &piTriggerSession{stop: stopSession, sessionLease: sessionLease, leaseRenewerDone: make(chan struct{})}
 
 	r.runningTriggersLock.Lock()
 	if r.runningTriggers == nil {
@@ -456,11 +550,12 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	r.runningTriggerSessions[triggerRefName] = session
 	r.runningTriggersLock.Unlock()
 	recordControllerSessionStart(metricControllerPiTrigger)
+	r.startSessionLeaseRenewer(ctx, reconcileLogger, triggerRefName, session)
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.RegisterTask(triggerRefName, stopSession)
 	}
 
-	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
+	logger := reconcileLogger.WithValues("trigger", triggerRefName, "grv", gvr.String())
 	triggerKey := client.ObjectKeyFromObject(trigger)
 	triggerUID := trigger.UID
 	triggerGeneration := trigger.Generation
@@ -488,15 +583,19 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 		}
 
 		r.runningTriggersLock.Lock()
+		var stopFn func()
 		if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
-			r.stopRunningTriggerLocked(triggerRefName)
+			stopFn = r.detachRunningTriggerLocked(triggerRefName)
 		}
 		r.runningTriggersLock.Unlock()
+		if stopFn != nil {
+			stopFn()
+		}
 	}
 	if sessionTimeout > 0 {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			handleSessionTimeout()
-			return nil
+			return nil, nil
 		}
 		go func() {
 			<-ctx.Done()
@@ -510,7 +609,7 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 	watchers, err := openWatchers(ctx, watchClients, listOpts)
 	if err != nil {
 		r.stopRunningTrigger(triggerRefName)
-		return err
+		return nil, err
 	}
 
 	lastResourceVersion := atomic.Pointer[string]{}
@@ -789,7 +888,7 @@ func (r *PiTriggerReconciler) createTrigger(triggerRefName string, trigger *trig
 		}()
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (r *PiTriggerReconciler) dispatchPiJob(ctx context.Context, triggerRefName string, trigger *triggersv1.PiTrigger, event watch.Event, obj *unstructured.Unstructured) (string, string, error) {
@@ -856,7 +955,7 @@ func (r *PiTriggerReconciler) dispatchTriggerSessionTimeoutJob(ctx context.Conte
 		timedOutTrigger,
 		eventPayload,
 		metadataPayload,
-		"TIMED_OUT: The trigger session timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.",
+		"TIMED_OUT: The trigger session timed out. Use the payload and metadata to handle timeout cleanup for this deleted trigger.",
 	)
 	return err
 }
@@ -902,7 +1001,7 @@ func (r *PiTriggerReconciler) dispatchOwnerLeaseTimeoutJob(ctx context.Context, 
 		trigger,
 		eventPayload,
 		metadataPayload,
-		fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the event payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName),
+		fmt.Sprintf("TIMED_OUT: The trigger owner lease %s timed out. Use the payload and metadata to handle timeout cleanup for this deleted trigger.", leaseName),
 	)
 	return err
 }
@@ -1174,17 +1273,24 @@ func buildPiTriggerTimeoutMessage(baseMessage, triggerRefName, resourceVersion, 
 
 func buildRecoverablePiTriggerWorkerPrompt(trigger *triggersv1.PiTrigger, jobName string, extraSections ...string) string {
 	sections := []string{}
+	// Prepend user-defined agent prompt prefix when provided (trimmed and non-empty)
+	if trigger != nil {
+		if agentPrefix := strings.TrimSpace(trigger.Spec.Agent.Prompt); agentPrefix != "" {
+			sections = append(sections, agentPrefix)
+		}
+	}
 	if wakeupPrompt := buildPiTriggerWakeupPrompt(trigger, jobName); wakeupPrompt != "" {
 		sections = append(sections, wakeupPrompt)
 	}
 	sections = append(sections,
-		"Task:\nHandle the triggering Kubernetes event using the mounted Pi agent configuration and the runtime PiTrigger skills.",
-		"The `pi-trigger-runtime-input` skill is generated by the runtime extension from the injected job environment and contains the decoded triggering event payload plus trigger metadata for this execution.",
+		"Important: Before exiting for any reason, persist the wake-up/session state (Session ID, Round, Worker Index and any session metadata) to the configured session store, then call `exit_pi`; on timeout or failure ensure the process terminates with a non-zero exit code (do not continue without persisting).",
+		"Task: Handle the triggering Kubernetes event using the mounted Pi agent configuration and the runtime PiTrigger skills; when performing timeout cleanup (TIMED_OUT) explicitly load the runtime input skill and the runtime diagnostics (job_status) for this worker Job, use those diagnostics to determine task failure and pod termination reason, create a Kubernetes Event owned by the triggered object describing the timeout and reason, and preserve the session Secret named in the runtime metadata (do NOT delete it) so that coordinated finalization/cleanup can occur later before calling `exit_pi`.",
+		"The `pi-trigger-runtime-input` skill is generated by the runtime extension from the injected job environment and contains the decoded triggering object payload plus trigger metadata for this execution.",
 		"The `pi-subagent-defaults-runtime` skill is generated from the injected PiTrigger agent defaults and should be used whenever this worker needs to create or hibernate sub-agents.",
 		"Use those runtime skills as the source of truth instead of looking for mounted event.json or metadata.json files or a prompt-prefixed sub-agent defaults payload.",
 	)
 	sections = append(sections, extraSections...)
-	sections = append(sections, "Load the runtime skills before acting so you can inspect the decoded event, trigger metadata, and sub-agent defaults.")
+	sections = append(sections, "Load the runtime skills before acting so you can inspect the decoded triggering object payload, trigger metadata, and sub-agent defaults.")
 	return strings.Join(sections, "\n\n")
 }
 
@@ -1218,7 +1324,7 @@ func buildPiTriggerTraceID(trigger *triggersv1.PiTrigger, eventPayload piTrigger
 }
 
 func buildPiTriggerRuntimeInputEnvValue(eventPayload piTriggerEventInput, metadataPayload piTriggerJobMetadata) (string, error) {
-	payload, err := json.Marshal(piTriggerRuntimeInput{Event: eventPayload, Metadata: metadataPayload})
+	payload, err := json.Marshal(piTriggerRuntimeInput{Payload: eventPayload.Object, Metadata: metadataPayload})
 	if err != nil {
 		return "", err
 	}
@@ -1226,9 +1332,9 @@ func buildPiTriggerRuntimeInputEnvValue(eventPayload piTriggerEventInput, metada
 }
 
 func mergePiTriggerWorkerExtensions(extensions []string) []string {
-	merged := make([]string, 0, len(extensions)+1)
+	merged := make([]string, 0, len(extensions)+3)
 	seen := map[string]struct{}{}
-	for _, extension := range append([]string{piTriggerRuntimeExtensionPath}, extensions...) {
+	for _, extension := range append([]string{piTriggerRuntimeExtensionPath, piTriggerTimeoutDiagnosticsExtensionPath, piTriggerServiceDiscoveryExtensionPath}, extensions...) {
 		trimmed := strings.TrimSpace(extension)
 		if trimmed == "" {
 			continue
@@ -1477,21 +1583,24 @@ func (r *PiTriggerReconciler) WatchInit(ctx context.Context) error {
 		}
 		triggerMu := r.triggerLock(refName)
 		triggerMu.Lock()
-		initErr := r.createTrigger(refName, &trigger)
+		initResult, initErr := r.createTrigger(ctx, logf.FromContext(ctx).WithValues("controller", "pitrigger", "name", refName), refName, &trigger)
 		triggerMu.Unlock()
 		if initErr != nil {
 			r.runningTriggersLock.Lock()
-			for runningRef, cancelFn := range r.runningTriggers {
-				if session, ok := r.runningTriggerSessions[runningRef]; ok && session != nil {
-					session.stop()
-				} else {
-					cancelFn()
+			stopFns := make([]func(), 0, len(r.runningTriggers))
+			for runningRef := range r.runningTriggers {
+				if stopFn := r.detachRunningTriggerLocked(runningRef); stopFn != nil {
+					stopFns = append(stopFns, stopFn)
 				}
-				delete(r.runningTriggers, runningRef)
-				delete(r.runningTriggerSessions, runningRef)
 			}
 			r.runningTriggersLock.Unlock()
+			for _, stopFn := range stopFns {
+				stopFn()
+			}
 			return initErr
+		}
+		if initResult != nil {
+			continue
 		}
 	}
 
@@ -1536,10 +1645,16 @@ func (r *PiTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Man
 		r.clear()
 		sharedPiTriggerJobCounterRegistry.clear()
 		r.runningTriggersLock.Lock()
+		stopFns := make([]func(), 0, len(r.runningTriggers))
 		for refName := range r.runningTriggers {
-			r.stopRunningTriggerLocked(refName)
+			if stopFn := r.detachRunningTriggerLocked(refName); stopFn != nil {
+				stopFns = append(stopFns, stopFn)
+			}
 		}
 		r.runningTriggersLock.Unlock()
+		for _, stopFn := range stopFns {
+			stopFn()
+		}
 
 		drainStart := time.Now()
 		for {

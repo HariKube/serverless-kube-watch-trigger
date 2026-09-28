@@ -90,7 +90,9 @@ type HTTPTriggerReconciler struct {
 }
 
 type httpTriggerSession struct {
-	stop func()
+	stop             func()
+	sessionLease     triggerSessionLease
+	leaseRenewerDone chan struct{}
 }
 
 // triggerLock returns the mutex that serializes reconcile work (session
@@ -116,27 +118,41 @@ func (r *HTTPTriggerReconciler) triggerLock(triggerRefName string) *sync.Mutex {
 // runningTriggersLock must NOT be held by the caller.
 func (r *HTTPTriggerReconciler) stopRunningTrigger(triggerRefName string) {
 	r.runningTriggersLock.Lock()
-	defer r.runningTriggersLock.Unlock()
+	stopFn := r.detachRunningTriggerLocked(triggerRefName)
+	r.runningTriggersLock.Unlock()
 
-	r.stopRunningTriggerLocked(triggerRefName)
+	if stopFn != nil {
+		stopFn()
+	}
 }
 
-// stopRunningTriggerLocked is stopRunningTrigger with runningTriggersLock held.
-func (r *HTTPTriggerReconciler) stopRunningTriggerLocked(triggerRefName string) {
+// detachRunningTriggerLocked removes the watcher session bookkeeping for a trigger and
+// returns the stop function that must be invoked after releasing runningTriggersLock.
+func (r *HTTPTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) func() {
+	var stopFn func()
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
-		cancel()
-		delete(r.runningTriggers, triggerRefName)
-		delete(r.runningTriggerSessions, triggerRefName)
+		stopFn = cancel
+	}
+	if stopFn == nil {
+		if session, ok := r.runningTriggerSessions[triggerRefName]; ok && session != nil {
+			stopFn = session.stop
+		}
+	}
+	delete(r.runningTriggers, triggerRefName)
+	delete(r.runningTriggerSessions, triggerRefName)
+	if stopFn != nil {
 		recordControllerSessionStop(metricControllerHTTPTrigger)
 	}
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.UnregisterTask(triggerRefName)
 	}
+	return stopFn
 }
 
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 // +kubebuilder:rbac:groups="",resources=secrets;services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
@@ -179,27 +195,36 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	if result, done, err := r.preflightReconcile(ctx, logger, triggerRefName, &trigger); done || err != nil {
-		return result, err
+	if done, err := r.preflightReconcile(ctx, logger, triggerRefName, &trigger); done || err != nil {
+		return ctrl.Result{}, err
 	}
 
-	leaseAcquired, result, err := r.acquireReconcileLease(ctx, logger, &trigger)
-	if err != nil || result != nil {
-		if result == nil {
-			return ctrl.Result{}, err
-		}
-		return *result, err
+	// Opt-in per-trigger reconcile lease (spec.lockDuration). It is claimed
+	// before the running session is torn down so a trigger whose lease is held
+	// by another replica keeps its current watcher instead of going dark until
+	// the requeue fires.
+	annotationLeaseAcquired, annotationLeaseRequeue, err := acquireAnnotationLease(
+		ctx,
+		logger,
+		r.Client,
+		&trigger,
+		trigger.Spec.LockDuration.Duration,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-
-	taskSucceeded := false
-	if leaseAcquired {
+	if annotationLeaseRequeue != nil {
+		return *annotationLeaseRequeue, nil
+	}
+	triggerSettled := false
+	if annotationLeaseAcquired {
 		defer func() {
-			if !taskSucceeded {
+			// A failed reconcile keeps the lease so the next attempt (or the
+			// requeue that follows) still observes an exclusive claim.
+			if !triggerSettled {
 				return
 			}
-			if err := lease.ClearLease(ctx, r.Client, &trigger); err != nil {
-				logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
-			}
+			_ = releaseAnnotationLease(ctx, logger, r.Client, &trigger)
 		}()
 	}
 
@@ -211,7 +236,8 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	patchedTrigger := trigger.DeepCopy()
 	patchedTrigger.Status.LastGeneration = trigger.Generation
 
-	if err := r.createTrigger(triggerRefName, &trigger); err != nil {
+	createResult, err := r.createTrigger(ctx, logger, triggerRefName, &trigger)
+	if err != nil {
 		permanent := errors.Is(err, ErrInvalidTriggerContent)
 		if !permanent {
 			logger.Error(err, "Trigger initialization failed")
@@ -237,6 +263,9 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		return ctrl.Result{}, err
 	}
+	if createResult != nil {
+		return *createResult, nil
+	}
 
 	patchedTrigger.Status.Phase = triggersv1.TriggerPhaseRunning
 	if !recoveryRestart {
@@ -253,12 +282,12 @@ func (r *HTTPTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logger.Error(err, "Trigger status update failed")
 		return ctrl.Result{}, err
 	}
+	triggerSettled = true
 
-	taskSucceeded = true
 	return ctrl.Result{}, nil
 }
 
-func (r *HTTPTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) (ctrl.Result, bool, error) {
+func (r *HTTPTriggerReconciler) preflightReconcile(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) (bool, error) {
 	if trigger.DeletionTimestamp != nil || !trigger.DeletionTimestamp.IsZero() {
 		logger.Info("Trigger deleted")
 		if err := r.deliverOwnerLeaseTimeoutCallback(ctx, logger, triggerRefName, trigger); err != nil {
@@ -266,65 +295,115 @@ func (r *HTTPTriggerReconciler) preflightReconcile(ctx context.Context, logger l
 		}
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
-		return ctrl.Result{}, true, nil
+		return true, nil
 	}
 	if r.PartitionController != nil && !r.PartitionController.OwnsObject(trigger) {
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
-		return ctrl.Result{}, true, nil
+		return true, nil
+	}
+	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning {
+		if err := r.clearExpiredAnnotationLease(ctx, logger, trigger); err != nil {
+			return true, err
+		}
+		if trigger.Status.LastGeneration == trigger.Generation {
+			return true, nil
+		}
 	}
 	if trigger.Generation == 1 && trigger.Status.LastGeneration == 0 {
 		logger.Info("Trigger created")
-		return ctrl.Result{}, false, nil
-	}
-	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning && trigger.Status.LastGeneration == trigger.Generation {
-		result, err := r.handleRunningTriggerLease(ctx, logger, trigger)
-		return result, true, err
+		return false, nil
 	}
 
 	logger.Info("Trigger updated")
-	return ctrl.Result{}, false, nil
+	return false, nil
 }
 
-func (r *HTTPTriggerReconciler) handleRunningTriggerLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.HTTPTrigger) (ctrl.Result, error) {
-	lockDuration := trigger.Spec.LockDuration.Duration
-	if lockDuration <= 0 {
-		return ctrl.Result{}, nil
-	}
-	if requeueAfter := lease.ActiveLeaseRemaining(trigger, time.Now().UTC(), lockDuration); requeueAfter > 0 {
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	}
-	if _, ok := trigger.GetAnnotations()[lease.AnnotationKey]; !ok {
-		return ctrl.Result{}, nil
-	}
-	if err := lease.ClearLease(ctx, r.Client, trigger); err != nil {
-		logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+// clearExpiredAnnotationLease removes an annotation lease that a previous
+// reconcile left behind. A lease that is still valid is left in place so a
+// replica that is mid-reconcile keeps its claim, and the current reconcile
+// requeues on it instead of racing ahead.
+func (r *HTTPTriggerReconciler) clearExpiredAnnotationLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.HTTPTrigger) error {
+	return clearExpiredAnnotationLease(ctx, logger, r.Client, trigger, trigger.Spec.LockDuration.Duration)
 }
 
-func (r *HTTPTriggerReconciler) acquireReconcileLease(ctx context.Context, logger logr.Logger, trigger *triggersv1.HTTPTrigger) (bool, *ctrl.Result, error) {
-	lockDuration := trigger.Spec.LockDuration.Duration
-	if lockDuration <= 0 {
-		return false, nil, nil
-	}
-
-	leaseResult, err := lease.TryAcquireLease(ctx, r.Client, trigger, time.Now().UTC(), lockDuration)
+func (r *HTTPTriggerReconciler) acquireSessionLease(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) (triggerSessionLease, *ctrl.Result, error) {
+	sessionLease := newTriggerSessionLease("httptrigger", trigger, triggerRefName, trigger.Spec.LockDuration.Duration)
+	leaseResult, err := lease.TryAcquireCoordinationLease(
+		ctx,
+		r.Client,
+		client.ObjectKey{Namespace: sessionLease.namespace, Name: sessionLease.name},
+		sessionLease.holderIdentity,
+		time.Now().UTC(),
+		sessionLease.duration,
+	)
 	if err != nil {
-		logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
-		return false, nil, err
+		logger.Error(err, "Trigger session lease acquisition failed", "lease", sessionLease.name)
+		return triggerSessionLease{}, nil, err
 	}
 	if leaseResult.RequeueAfter > 0 {
-		logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
-		return false, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
+		logger.V(1).Info("Trigger session lease is held by another replica, requeueing", "lease", sessionLease.name, "requeueAfter", leaseResult.RequeueAfter.String())
+		return triggerSessionLease{}, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
 	}
-	if leaseResult.Conflict {
-		retryAfter := lease.ConflictRetryDelay()
-		logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
-		return false, &ctrl.Result{RequeueAfter: retryAfter}, nil
+	return sessionLease, nil, nil
+}
+
+func (r *HTTPTriggerReconciler) startSessionLeaseRenewer(ctx context.Context, logger logr.Logger, triggerRefName string, session *httpTriggerSession) {
+	if session == nil {
+		return
 	}
-	return leaseResult.Acquired, nil, nil
+	renewEvery := session.sessionLease.duration / 3
+	if renewEvery < time.Second {
+		renewEvery = time.Second
+	}
+	go func() {
+		if session.leaseRenewerDone != nil {
+			defer close(session.leaseRenewerDone)
+		}
+		ticker := time.NewTicker(renewEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if ctx.Err() != nil {
+				return
+			}
+
+			renewed, err := lease.RenewCoordinationLease(
+				ctx,
+				r.Client,
+				client.ObjectKey{Namespace: session.sessionLease.namespace, Name: session.sessionLease.name},
+				session.sessionLease.holderIdentity,
+				time.Now().UTC(),
+				session.sessionLease.duration,
+			)
+			if ctx.Err() != nil {
+				return
+			}
+			if err == nil && renewed {
+				continue
+			}
+			if err != nil {
+				logger.Error(err, "Trigger session lease renew failed", "lease", session.sessionLease.name)
+			} else {
+				logger.Info("Trigger session lease lost; stopping watcher session", "lease", session.sessionLease.name)
+			}
+
+			r.runningTriggersLock.Lock()
+			var stopFn func()
+			if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
+				stopFn = r.detachRunningTriggerLocked(triggerRefName)
+			}
+			r.runningTriggersLock.Unlock()
+			if stopFn != nil {
+				stopFn()
+			}
+			return
+		}
+	}()
 }
 
 func (r *HTTPTriggerReconciler) deliverOwnerLeaseTimeoutCallback(ctx context.Context, logger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
@@ -502,18 +581,18 @@ func leaseTimedOut(ownerLease *coordinationv1.Lease, now time.Time) bool {
 }
 
 //nolint:gocyclo
-func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *triggersv1.HTTPTrigger) error {
+func (r *HTTPTriggerReconciler) createTrigger(reconcileCtx context.Context, reconcileLogger logr.Logger, triggerRefName string, trigger *triggersv1.HTTPTrigger) (*ctrl.Result, error) {
 	resourceVersion := triggerResourceVersion(trigger.Status.ErrorResourceVersion)
 	gvr, gvk := buildTriggerResourceInfo(trigger.Spec.Resource)
 	eventTypes := buildTriggerEventTypes(trigger.Spec.EventType)
 
 	compiledTemplates := map[string]*template.Template{}
 	if err := compileSharedTemplates(compiledTemplates, trigger.Spec.EventFilter, trigger.Spec.URL, trigger.Spec.Headers); err != nil {
-		return err
+		return nil, err
 	}
 	if trigger.Spec.Body.Template != "" {
 		if err := addCompiledTemplate(compiledTemplates, "body_template", trigger.Spec.Body.Template, template.FuncMap{"toJson": toJson}); err != nil {
-			return errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
+			return nil, errors.Join(err, ErrInvalidTriggerContent, errors.New("failed to parse body template"))
 		}
 	}
 
@@ -522,41 +601,46 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 
 	serviceScheme, servicePort, err := resolveServiceEndpoint(depFetchCtx, r, trigger.Spec.URL.Service)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var userAuthPassword string
 	if trigger.Spec.Auth.BasicAuth != nil {
 		userAuthPassword, err = loadSecretString(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.BasicAuth.PasswordRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	headerSecrets, err := loadHeaderSecrets(depFetchCtx, r, trigger.Namespace, trigger.Spec.Headers.FromSecretRef)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var signature []byte
 	if trigger.Spec.Body.Signature.KeySecretRef.Name != "" {
 		signature, err = loadSecretBytes(depFetchCtx, r, trigger.Namespace, trigger.Spec.Body.Signature.KeySecretRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	concurrency := normalizeConcurrency(trigger.Spec.Concurrency)
 	httpClient, err := newTriggerHTTPClient(depFetchCtx, r, trigger.Namespace, trigger.Spec.Auth.TLS, trigger.Spec.Delivery.Timeout.Duration, concurrency)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resourceClient, err := getWatcherResourceClient(depFetchCtx, r, trigger.Namespace, r.DynamicClient.Resource(gvr), trigger.Spec.WatcherKubeconfigSecret, gvr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	watchClients := buildWatchClients(resourceClient, trigger.Spec.Namespaces)
+
+	sessionLease, result, err := r.acquireSessionLease(reconcileCtx, reconcileLogger, triggerRefName, trigger)
+	if err != nil || result != nil {
+		return result, err
+	}
 
 	sessionTimeout := trigger.Spec.Timeout.Duration
 	sessionCtx, sessionCancel := context.WithCancel(r.ctx)
@@ -566,6 +650,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		ctx, timeoutCancel = context.WithTimeout(sessionCtx, sessionTimeout)
 	}
 
+	var session *httpTriggerSession
 	var stopSessionOnce sync.Once
 	stopSession := func() {
 		stopSessionOnce.Do(func() {
@@ -573,10 +658,26 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 				timeoutCancel()
 			}
 			sessionCancel()
+			if session != nil && session.leaseRenewerDone != nil {
+				select {
+				case <-session.leaseRenewerDone:
+				case <-time.After(2 * time.Second):
+				}
+			}
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer releaseCancel()
+			if err := lease.ReleaseCoordinationLease(
+				releaseCtx,
+				r.Client,
+				client.ObjectKey{Namespace: sessionLease.namespace, Name: sessionLease.name},
+				sessionLease.holderIdentity,
+			); err != nil {
+				reconcileLogger.Error(err, "Trigger session lease release failed", "lease", sessionLease.name)
+			}
 		})
 	}
 
-	session := &httpTriggerSession{stop: stopSession}
+	session = &httpTriggerSession{stop: stopSession, sessionLease: sessionLease, leaseRenewerDone: make(chan struct{})}
 
 	r.runningTriggersLock.Lock()
 	if r.runningTriggers == nil {
@@ -589,6 +690,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	r.runningTriggerSessions[triggerRefName] = session
 	r.runningTriggersLock.Unlock()
 	recordControllerSessionStart(metricControllerHTTPTrigger)
+	r.startSessionLeaseRenewer(ctx, reconcileLogger, triggerRefName, session)
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.RegisterTask(triggerRefName, stopSession)
 	}
@@ -603,7 +705,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 	if err != nil {
 		r.stopRunningTrigger(triggerRefName)
 
-		return err
+		return nil, err
 	}
 
 	lastResourceVersion := atomic.Pointer[string]{}
@@ -655,18 +757,21 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		if latest.Generation != trigger.Generation {
 			return
 		}
-		if latest.Status.Phase == triggersv1.TriggerPhaseError && latest.Status.ErrorReason == errorReason && latest.Status.ErrorResourceVersion == errorResourceVersion {
-			return
-		}
 
+		// Always refresh ErrorTime so repeated identical runtime delivery
+		// failures still advance status.errorTime; only update reason/resourceVersion
+		// and phase when they have changed so the recovery semantics remain intact.
 		patched := latest.DeepCopy()
 		patched.Status.ErrorTime = metav1.Now()
-		patched.Status.ErrorReason = errorReason
-		patched.Status.ErrorResourceVersion = errorResourceVersion
+		if latest.Status.Phase != triggersv1.TriggerPhaseError || latest.Status.ErrorReason != errorReason || latest.Status.ErrorResourceVersion != errorResourceVersion {
+			patched.Status.ErrorReason = errorReason
+			patched.Status.ErrorResourceVersion = errorResourceVersion
+			patched.Status.Phase = triggersv1.TriggerPhaseError
+		}
 		_ = r.Status().Patch(patchCtx, patched, client.MergeFrom(latest))
 	}
 
-	logger := logf.FromContext(ctx).WithValues("trigger", triggerRefName, "grv", gvr.String())
+	logger := reconcileLogger.WithValues("trigger", triggerRefName, "grv", gvr.String())
 	if sessionTimeout > 0 {
 		go func(session *httpTriggerSession) {
 			<-ctx.Done()
@@ -693,10 +798,14 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 			}
 
 			r.runningTriggersLock.Lock()
+			var stopFn func()
 			if currentSession, ok := r.runningTriggerSessions[triggerRefName]; ok && currentSession == session {
-				r.stopRunningTriggerLocked(triggerRefName)
+				stopFn = r.detachRunningTriggerLocked(triggerRefName)
 			}
 			r.runningTriggersLock.Unlock()
+			if stopFn != nil {
+				stopFn()
+			}
 		}(session)
 	}
 
@@ -917,7 +1026,7 @@ func (r *HTTPTriggerReconciler) createTrigger(triggerRefName string, trigger *tr
 		}()
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
@@ -946,19 +1055,28 @@ func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {
 
 		triggerMu := r.triggerLock(refName)
 		triggerMu.Lock()
-		initErr := r.createTrigger(refName, &trigger)
+		initResult, initErr := r.createTrigger(ctx, logf.FromContext(ctx).WithValues("controller", "httptrigger", "name", refName), refName, &trigger)
 		triggerMu.Unlock()
 
 		if initErr != nil {
 			// Cancel every session started so far: a partially-initialized
 			// operator must not leave zombie watchers behind.
 			r.runningTriggersLock.Lock()
+			stopFns := make([]func(), 0, len(r.runningTriggers))
 			for runningRef := range r.runningTriggers {
-				r.stopRunningTriggerLocked(runningRef)
+				if stopFn := r.detachRunningTriggerLocked(runningRef); stopFn != nil {
+					stopFns = append(stopFns, stopFn)
+				}
 			}
 			r.runningTriggersLock.Unlock()
+			for _, stopFn := range stopFns {
+				stopFn()
+			}
 
 			return initErr
+		}
+		if initResult != nil {
+			continue
 		}
 	}
 
@@ -1008,10 +1126,16 @@ func (r *HTTPTriggerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.M
 		// Cancel every running watcher session and remove its map entry so the
 		// goroutines watching it can terminate promptly.
 		r.runningTriggersLock.Lock()
+		stopFns := make([]func(), 0, len(r.runningTriggers))
 		for refName := range r.runningTriggers {
-			r.stopRunningTriggerLocked(refName)
+			if stopFn := r.detachRunningTriggerLocked(refName); stopFn != nil {
+				stopFns = append(stopFns, stopFn)
+			}
 		}
 		r.runningTriggersLock.Unlock()
+		for _, stopFn := range stopFns {
+			stopFn()
+		}
 
 		// Wait for the sessions to drain so in-flight status writes and watch
 		// loops settle before the manager stops. The wait is bounded so

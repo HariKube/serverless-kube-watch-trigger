@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -57,6 +58,15 @@ var (
 		Name:      "calls_failed_total",
 		Help:      "Total number of failed endpoint calls made by the operator, per trigger and failure reason.",
 	}, []string{"kind", "trigger", "method", "reason"})
+
+	// A stable, small-cardinality classification of HTTP/transport failures used
+	// for richer observability without exposing raw error strings.
+	deliveryCallsFailedClassTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "delivery",
+		Name:      "calls_failed_class_total",
+		Help:      "Total number of failed endpoint calls classified by stable error class (network, timeout, client_error, server_error, unknown).",
+	}, []string{"kind", "trigger", "method", "class"})
 
 	deliveryCallDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricsNamespace,
@@ -107,12 +117,36 @@ var (
 		Name:      "pitrigger_jobs_running",
 		Help:      "Number of Pi worker Jobs currently running or reserved for dispatch, per trigger.",
 	}, []string{"trigger"})
+
+	// PiTrigger job lifecycle metrics: durations, terminal outcomes and requeues.
+	pitriggerJobDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "pitrigger",
+		Name:      "job_duration_seconds",
+		Help:      "Duration of PiTrigger worker Jobs from dispatch to terminal state, in seconds.",
+		Buckets:   prometheus.DefBuckets,
+	}, []string{"trigger", "outcome"})
+
+	pitriggerJobTerminalsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "pitrigger",
+		Name:      "job_terminals_total",
+		Help:      "Counts of PiTrigger job terminal outcomes (success, error) and stable reason classifications.",
+	}, []string{"trigger", "outcome", "reason"})
+
+	pitriggerJobRequeuesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "pitrigger",
+		Name:      "job_requeues_total",
+		Help:      "Number of times PiTrigger jobs were requeued for processing, by stable reason.",
+	}, []string{"trigger", "reason"})
 )
 
 func init() {
 	crmetrics.Registry.MustRegister(
 		deliveryCallsTotal,
 		deliveryCallsFailedTotal,
+		deliveryCallsFailedClassTotal,
 		deliveryCallDurationSeconds,
 		deliveryRetriesTotal,
 		deliveryBackoffsTotal,
@@ -120,6 +154,9 @@ func init() {
 		reconcilesRunning,
 		watcherGoroutinesRunning,
 		piTriggerRunningJobs,
+		pitriggerJobDurationSeconds,
+		pitriggerJobTerminalsTotal,
+		pitriggerJobRequeuesTotal,
 	)
 }
 
@@ -188,4 +225,50 @@ func setPiTriggerRunningJobs(trigger string, running int) {
 
 func deletePiTriggerRunningJobs(trigger string) {
 	piTriggerRunningJobs.DeleteLabelValues(trigger)
+}
+
+// classifyHTTPError produces a small-cardinality, stable label describing the
+// observable class of an HTTP/transport failure. Callers should pass the
+// transport error (if any) and the HTTP status code when available. The
+// function intentionally returns readable labels rather than raw error text to
+// avoid label cardinality explosions.
+func classifyHTTPError(err error, statusCode int) string {
+	if err != nil {
+		// network/timeout vs other request errors
+		if ne, ok := err.(net.Error); ok {
+			if ne.Timeout() {
+				return "timeout"
+			}
+			return "network"
+		}
+		return "request_error"
+	}
+	// No transport error - classify by status code range.
+	if statusCode >= 200 && statusCode < 300 {
+		return metricResultSuccess
+	} else if statusCode >= 400 && statusCode < 500 {
+		return "client_error"
+	} else if statusCode >= 500 && statusCode < 600 {
+		return "server_error"
+	}
+	return "status_unknown"
+}
+
+// recordDeliveryHTTPClass increments the failure-class counter used for
+// richer HTTP error observability.
+func recordDeliveryHTTPClass(kind, trigger, method, class string) {
+	deliveryCallsFailedClassTotal.WithLabelValues(kind, trigger, method, class).Inc()
+}
+
+// recordPiTriggerJobTerminal records a terminal outcome and duration when the
+// caller already has a measured duration.
+func recordPiTriggerJobTerminal(trigger, outcome, reason string, duration time.Duration) {
+	pitriggerJobDurationSeconds.WithLabelValues(trigger, outcome).Observe(duration.Seconds())
+	pitriggerJobTerminalsTotal.WithLabelValues(trigger, outcome, reason).Inc()
+}
+
+// recordPiTriggerJobRequeue records that a PiTrigger job was requeued with a
+// small-cardinality reason label.
+func recordPiTriggerJobRequeue(trigger, reason string) {
+	pitriggerJobRequeuesTotal.WithLabelValues(trigger, reason).Inc()
 }

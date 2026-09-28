@@ -249,8 +249,16 @@ func (in *Headers) DeepCopy() *Headers {
 func (in *PiAgentSpec) DeepCopyInto(out *PiAgentSpec) {
 	*out = *in
 	out.ConfigSecretRef = in.ConfigSecretRef
-	out.PromptsConfigMapRef = in.PromptsConfigMapRef
-	out.SkillsConfigMapRef = in.SkillsConfigMapRef
+	if in.PromptsConfigMapRef != nil {
+		in, out := &in.PromptsConfigMapRef, &out.PromptsConfigMapRef
+		*out = new(corev1.LocalObjectReference)
+		**out = **in
+	}
+	if in.SkillsConfigMapRef != nil {
+		in, out := &in.SkillsConfigMapRef, &out.SkillsConfigMapRef
+		*out = new(corev1.LocalObjectReference)
+		**out = **in
+	}
 	if in.Extensions != nil {
 		in, out := &in.Extensions, &out.Extensions
 		*out = make([]string, len(*in))

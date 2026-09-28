@@ -14,15 +14,29 @@ spec:
         content: make -C ../../../.. package docker-build docker-load deploy
   - name: Verify PiTrigger rollout
     try:
-    - assert:
-        resource:
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: serverless-kube-watch-trigger-controller-manager 
-            namespace: serverless-kube-watch-trigger-system
-          status:
-            readyReplicas: 1
+    - script:
+        content: |-
+          set -euo pipefail
+          # Bounded rollout check: wait for the rollout to finish, then ensure one ready replica.
+          kubectl -n serverless-kube-watch-trigger-system rollout status deployment/serverless-kube-watch-trigger-controller-manager --timeout=2m
+          # Some API servers return an empty status object briefly; poll for readyReplicas=1 with a bounded timeout.
+          TIMEOUT=120
+          INTERVAL=2
+          ELAPSED=0
+          while true; do
+            readyReplicas=$(kubectl -n serverless-kube-watch-trigger-system get deployment serverless-kube-watch-trigger-controller-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+            if [ "${readyReplicas}" = "1" ]; then
+              echo "Deployment has 1 ready replica"
+              break
+            fi
+            if [ $ELAPSED -ge $TIMEOUT ]; then
+              echo "Timed out waiting for readyReplicas=1" >&2
+              kubectl -n serverless-kube-watch-trigger-system get deployment serverless-kube-watch-trigger-controller-manager -o yaml || true
+              exit 1
+            fi
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
   - name: Configure extra RBAC
     try:
     - apply:

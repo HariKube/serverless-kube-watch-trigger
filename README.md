@@ -229,20 +229,29 @@ trigger and persists across watcher session restarts, so an endpoint that keeps
 failing is not hammered again by a recovering watcher replaying events. Any
 successful delivery resets the gate.
 
-**Observability.** Per-trigger delivery metrics are exported on the standard
-controller-runtime `/metrics` endpoint under the `serverless_kube_watch_trigger_delivery_*`
-family; the metrics family exists in the operator, however the default install manifests leave the `/metrics` endpoint disabled — enable the optional metrics service/patches in the install bundle to expose `/metrics`.
+**Observability.** Metrics are registered on the controller-runtime `/metrics` endpoint (they are disabled by default in the install manifests—enable the optional metrics service/patches in the install bundle to expose `/metrics`).
 
-| Metric                                        | Labels                                  | Meaning                                  |
-| --------------------------------------------- | --------------------------------------- | ---------------------------------------- |
-| `delivery_calls_total`                        | `kind`, `trigger`, `method`, `result`, `status_code` | Outgoing endpoint calls by outcome. |
-| `delivery_calls_failed_total`                 | `kind`, `trigger`, `method`, `reason`   | Failed calls (`request` vs `status`).    |
-| `delivery_call_duration_seconds`              | `kind`, `trigger`, `method`, `result`   | Call latency.                            |
-| `delivery_retries_total`                      | `kind`, `trigger`, `method`, `result`   | Retry attempts.                          |
-| `delivery_backoffs_total`                     | `kind`, `trigger`                       | Deliveries delayed by the failure gate.  |
+The operator exports delivery, runtime and PiTrigger job metrics under the `serverless_kube_watch_trigger` namespace; key measured families are:
 
-`kind` is `httptrigger` for outgoing HTTP endpoint metrics; `pitrigger` is used for PiTrigger-related deliveries and when PiTrigger executions are delayed by the shared failure gate.
-In all cases, `trigger` is the `namespace/name` of the trigger instance.
+| Metric                                      | Labels                                      | Meaning |
+| ------------------------------------------- | ------------------------------------------- | ------- |
+| `delivery_calls_total`                      | `kind`, `trigger`, `method`, `result`, `status_code` | Outgoing endpoint calls by outcome (success/error) and HTTP status code. |
+| `delivery_calls_failed_total`               | `kind`, `trigger`, `method`, `reason`       | Failed calls with legacy reason (`request` vs `status`). |
+| `delivery_calls_failed_class_total`         | `kind`, `trigger`, `method`, `class`        | Failed calls classified by a stable, low-cardinality HTTP/transport class (see note). |
+| `delivery_call_duration_seconds`            | `kind`, `trigger`, `method`, `result`       | Call latency histogram. |
+| `delivery_retries_total`                    | `kind`, `trigger`, `method`, `result`       | Number of retry attempts. |
+| `delivery_backoffs_total`                   | `kind`, `trigger`                           | Times deliveries were spaced out by the sustained-failure gate. |
+| `runtime_controllers_running`              | `controller`                                | Gauge of active controller sessions/workers by controller. |
+| `runtime_reconciles_running`                | `controller`                                | Gauge of concurrently running reconcile calls by controller. |
+| `runtime_watcher_goroutines_running`        | `controller`                                | Gauge of watcher goroutines currently running by controller. |
+| `pitrigger_jobs_running`                    | `trigger`                                   | Gauge of Pi worker Jobs currently running or reserved, per trigger. |
+| `pitrigger_job_duration_seconds`            | `trigger`, `outcome`                        | Duration of PiTrigger worker Jobs (dispatch → terminal). |
+| `pitrigger_job_terminals_total`             | `trigger`, `outcome`, `reason`              | Counts of PiTrigger job terminal outcomes and stable reasons. |
+| `pitrigger_job_requeues_total`              | `trigger`, `reason`                         | Times PiTrigger jobs were requeued by stable reason. |
+
+Note: the `kind` label denotes the delivery/trigger type (e.g. `httptrigger` for HTTP deliveries, `pitrigger` for PiTrigger-related deliveries); `trigger` is always the trigger's `namespace/name`.
+
+Stable HTTP/transport failure class labels include (high-level): `timeout`, `network`, `request_error`, `client_error`, `server_error`, and `status_unknown` — these are exported via `delivery_calls_failed_class_total` for low-cardinality aggregation while the legacy `reason` label still exposes `request` vs `status` in `delivery_calls_failed_total`.
 
 ---
 
@@ -288,6 +297,7 @@ spec:
     - MODIFIED
   eventFilter: 'ne .status.availableReplicas 0'
   lockDuration: 5m # Optional, enables annotation locking for this trigger using a 5m lease
+  # Recommended: set lockDuration ≈ spec.timeout + 5s so the reconcile lease slightly outlives the PiTrigger watcher/session timeout.
   # Optional: point watcher loops at an alternate cluster by referencing a Secret (must contain kubeconfig under key "kubeconfig")
   watcherKubeconfigSecret:
     name: external-cluster-kubeconfig
@@ -303,12 +313,13 @@ spec:
       name: pi-agent-skills
     provider: openai
     model: gpt-4o-mini
+    prompt: "Review the triggering Kubernetes event and summarize the most important changes."
     workingDir: /workspace
     noExtensions: true
     extensions:
       - npm:pi-graft
     timeout: 10m
-    serviceAccountName: pi-trigger-runner
+    serviceAccountName: pi-agent-worker
     imagePullPolicy: IfNotPresent
     env:
       - name: PI_ENVIRONMENT
@@ -397,6 +408,7 @@ data:
 ```
 
 Sample manifests are also available under `config/samples/`.
+For PiTrigger workers, apply `config/samples/pi-agent-worker-rbac.yaml` and use the built-in worker ServiceAccount name `pi-agent-worker`.
 
 ### Ephemeral PiTrigger Sessions & Sleep/Wake Agent Orchestration
 
@@ -485,6 +497,7 @@ Then reference it from `spec.agent.image`.
 | `resolve_subagent_defaults` | Resolve worker delegation defaults from runtime env or legacy prompt prefix. | `hack/pi-agent/subagent-defaults.ts` |
 | `decision_maker` | Validate whether work should stay local or be delegated. | `hack/pi-agent/decision-maker.ts` |
 | `headless` | Run one bounded dependent task in a separate headless `pi` process. | `hack/pi-agent/headless.ts` |
+| `create_pitrigger` | Create or prepare a standalone `PiTrigger`, optionally reusing runtime sub-agent defaults for namespace and agent settings. | `hack/pi-agent/create-pitrigger.ts` |
 | `prepare_session_hibernation` | Generate session Secret and worker PiTrigger manifests for delegated flows. | `hack/pi-agent/prepare-session-hibernation.ts` |
 | `process_session_wakeup` | Fold a worker report back into stored session state. | `hack/pi-agent/process-session-wakeup.ts` |
 | `hibernate_session` | Persist a parent session and create delegated worker PiTriggers. | `hack/pi-agent/session-backup.ts` |
@@ -492,6 +505,13 @@ Then reference it from `spec.agent.image`.
 | `choose_execution_mode` | Choose `stay-local`, `headless`, or `delegate` using shared timeout rules. | `hack/pi-agent/execution-mode.ts` |
 | `orchestrate_subagent_execution` | Combine execution-mode selection with optional delegation/hibernation setup. | `hack/pi-agent/subagent-orchestrator.ts` |
 | `exit_pi` | Terminate the worker process cleanly after state is persisted or intentionally abandoned. | `hack/pi-agent/exit.ts` |
+
+The worker image also bundles runtime-skill extensions that PiTrigger workers add automatically and that do not register tools directly:
+
+| Extension | Runtime skill(s) | Reason | Where to find |
+| --- | --- | --- | --- |
+| `pitrigger-input` | `pi-trigger-runtime-input`, `pi-subagent-defaults-runtime` | Decode injected PiTrigger payloads once at startup and publish them as runtime skills. | `hack/pi-agent/pitrigger-input.ts` |
+| `kubernetes-service-discovery` | `kubernetes-service-discovery-runtime` | Query Kubernetes discovery once at startup and publish the service-related API kinds available in the current cluster. | `hack/pi-agent/kubernetes-service-discovery.ts` |
 
 You can load pi extensions in two ways:
 
@@ -527,8 +547,9 @@ This is the easiest way to ship team-specific prompts, reusable skills, or per-e
 * `configSecretRef` is mounted into the worker home as the pi agent config directory.
 * `promptsConfigMapRef` and `skillsConfigMapRef` are mounted on top of that same worker home.
 * `provider`, `model`, `noExtensions`, and `extensions` are passed to `pi` as container args.
+* `prompt` (optional) is prepended to the controller-generated worker prompt and becomes the worker's prompt prefix.
 * `workingDir` is applied as the container working directory.
-* Trigger-level `spec.timeout` limits the watcher/session lifetime for the trigger and is enforced from the trigger's creation timestamp (not reset on reconcile); when it expires the controller emits a final deleted-event timeout cleanup (PiTrigger: final cleanup Job/message; HTTPTrigger: deleted-event timeout callback/message) before deleting the trigger.
+* Trigger-level `spec.timeout` limits the watcher/session lifetime for the trigger and is enforced from the trigger's creation timestamp (not reset on reconcile); when it expires the controller emits a final deleted-event timeout cleanup (PiTrigger: final cleanup Job/message; HTTPTrigger: deleted-event timeout callback/message) before deleting the trigger.  Recommended: for safe handover, set the trigger's `spec.lockDuration` to `spec.timeout + 5s` so the reconcile lease slightly outlives the PiTrigger watcher/session timeout.
 * Agent-level `spec.agent.timeout` limits worker runtime by defaulting `activeDeadlineSeconds` when that field is not set explicitly.
 * `ttlSecondsAfterFinished` defaults to `86400` seconds (`24h`) when unset.
 * `workingDir` should exist in the image, for example `/workspace`.
@@ -552,6 +573,7 @@ In addition, `spec.timeout` controls the watcher/session lifetime and is enforce
 | `skillsConfigMapRef` | Required ConfigMap mounted into `~/.pi/agent/skills`. |
 | `provider` | Optional pi provider passed to the spawned `pi` process. |
 | `model` | Optional pi model passed to the spawned `pi` process. |
+| `prompt` | Optional string prefixed to the controller-generated worker prompt (becomes the worker's prompt prefix). |
 | `workingDir` | Optional working directory used by the worker container. |
 | `noExtensions` | Optional flag controlling ambient pi extension loading; defaults to `true`. |
 | `extensions` | Optional explicit pi extensions to load for the worker. |
@@ -569,6 +591,9 @@ In addition, `spec.timeout` controls the watcher/session lifetime and is enforce
 
 * Each matching event is rendered as base64-encoded JSON in `PI_TRIGGER_INPUT_BASE64`, and the worker's PiTrigger delegation defaults are rendered as base64-encoded JSON in `PI_SUBAGENT_DEFAULTS_BASE64`, before the operator creates a Job to run `pi`.
 * The bundled `pitrigger-input.ts` extension decodes both environment variables once at startup, fails fast if either is missing, and publishes dynamic `pi-trigger-runtime-input` and `pi-subagent-defaults-runtime` skills with the decoded runtime payloads.
+* The bundled `kubernetes-service-discovery.ts` extension queries Kubernetes discovery once per worker execution and publishes `kubernetes-service-discovery-runtime`, a runtime skill listing the service-related API kinds available in the current cluster.
+* The bundled helper skill `hack/pi-agent/kubernetes-service-discovery.md` tells workers to prefer that runtime snapshot over guessing which service CRDs exist.
+* The bundled helper skill `hack/pi-agent/create-pitrigger.md` documents the standalone `create_pitrigger` extension and when to prefer the higher-level session helpers instead.
 * In session-hibernation fan-out, worker `PiTrigger`s are created in a second pass after the session Secret exists and its UID has been read back; the Secret owns those worker triggers, and each worker `PiTrigger` owns its own Job.
 * Use `promptsConfigMapRef` and `skillsConfigMapRef` to ship custom prompts and skills with the worker image.
 * The Job keeps the image `ENTRYPOINT` and passes `pi` runtime options through container args.

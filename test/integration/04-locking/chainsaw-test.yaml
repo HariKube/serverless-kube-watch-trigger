@@ -5,7 +5,7 @@ metadata:
 spec:
   timeouts:
     exec: 6m
-  skipDelete: true
+  skipDelete: false
   namespace: locking
   steps:
   - name: Prepare distributed-mode RBAC
@@ -95,6 +95,23 @@ spec:
           kubectl wait --for=jsonpath='{.status.readyReplicas}'=2 \
             deployment/serverless-kube-watch-trigger-controller-manager \
             -n serverless-kube-watch-trigger-system --timeout=300s
+    # This step rewrites the operator into a two-replica, leader-election-free
+    # shape. Restoring it has to happen even when a later step fails, otherwise
+    # the cluster is left with two non-leader replicas and every later run
+    # silently stops reconciling.
+    finally:
+    - script:
+        content: |
+          set -uo pipefail
+          kubectl delete clusterrolebinding \
+            serverless-kube-watch-trigger-distributed-rolebinding --ignore-not-found
+          kubectl delete clusterrole \
+            serverless-kube-watch-trigger-distributed-role --ignore-not-found
+          kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --type=strategic \
+            -p '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"manager","args":["--leader-elect","--health-probe-bind-address=:8081"]}]}}}}'
+          kubectl rollout status deployment/serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --timeout=300s
   - name: Create webhook backend
     try:
     - apply:
@@ -146,8 +163,28 @@ spec:
             readyReplicas: 1
   - name: Create HTTPTrigger and verify lease is written then cleared
     try:
-    - apply:
-        resource:
+    - script:
+        content: |
+          set -euo pipefail
+
+          # The annotation lease only exists for the duration of a single
+          # reconcile, which is far shorter than a polling interval, so the
+          # trigger is created while a watch on the whole collection is
+          # recording every object version. Watching the collection (rather
+          # than the single object) also lets the watch start before the
+          # trigger exists, which a named watch cannot do.
+          #
+          # Fields are separated by "|" rather than a tab: kubectl's jsonpath
+          # does not emit a real tab for {"\t"}, and the script runs under a
+          # busybox shell whose awk does not treat -F'\t' as a tab either.
+          watch_file="$(mktemp)"
+          kubectl get httptriggers -n locking --watch \
+            --output=jsonpath='{.metadata.name}{"|"}{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}{"|"}{.status.phase}{"\n"}' \
+            > "$watch_file" 2>&1 &
+          watch_pid=$!
+          sleep 2
+
+          kubectl apply -f - >/dev/null <<'EOF'
           apiVersion: triggers.harikube.info/v1
           kind: HTTPTrigger
           metadata:
@@ -173,24 +210,46 @@ spec:
                 uri:
                   static: "/"
             method: GET
-    - script:
-        content: |
-          set -euo pipefail
-          seen=""
+          EOF
+
+          settled=""
           for _ in $(seq 1 80); do
-            annotation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}' 2>/dev/null || true)"
             phase="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-            if [ -n "$annotation" ]; then
-              seen=1
-            fi
-            if [ -n "$seen" ] && [ "$phase" = "Running" ] && [ -z "$annotation" ]; then
-              exit 0
+            annotation="$(kubectl get httptrigger locking-httptrigger -n locking -o jsonpath='{.metadata.annotations.triggers\.harikube\.info/lock-timestamp}' 2>/dev/null || true)"
+            if [ "$phase" = "Running" ] && [ -z "$annotation" ]; then
+              settled=1
+              break
             fi
             sleep 0.25
           done
-          echo "expected to observe the annotation lease being written and then cleared"
-          kubectl get httptrigger locking-httptrigger -n locking -o yaml
-          exit 1
+
+          kill "$watch_pid" 2>/dev/null || true
+          wait "$watch_pid" 2>/dev/null || true
+
+          if [ -z "$settled" ]; then
+            echo "expected the trigger to settle as Running with the annotation lease released"
+            kubectl get httptrigger locking-httptrigger -n locking -o yaml
+            exit 1
+          fi
+
+          # Some recorded version of the trigger must have carried the lease.
+          if ! awk -F'|' '$1 == "locking-httptrigger" && $2 != "" { found = 1 } END { exit !found }' "$watch_file"; then
+            echo "expected to observe the annotation lease being written and then cleared"
+            echo "--- observed trigger versions (name|lock-timestamp|phase) ---"
+            cat "$watch_file"
+            echo "--- awk field dump ---"
+            awk -F'|' '{ printf "line %d: nf=%d f1=[%s] f2=[%s] f3=[%s]\n", NR, NF, $1, $2, $3 }' "$watch_file"
+            echo "--- current trigger ---"
+            kubectl get httptrigger locking-httptrigger -n locking -o yaml
+            exit 1
+          fi
+    - assert:
+        resource:
+          apiVersion: triggers.harikube.info/v1
+          kind: HTTPTrigger
+          metadata:
+            name: locking-httptrigger
+            namespace: locking
   - name: Hold an active lease and verify reconcile is requeued until expiry
     try:
     - script:

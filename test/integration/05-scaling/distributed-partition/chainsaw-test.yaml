@@ -156,6 +156,25 @@ spec:
           kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 \
             deployment/serverless-kube-watch-trigger-controller-manager \
             -n serverless-kube-watch-trigger-system --timeout=300s
+    # This step switches the operator into a three-replica, leader-election-free
+    # shape and (via the step above) binds it to the distributed partition. Both
+    # have to be undone even when a later step fails: a leftover
+    # distributed-rolebinding makes the operator ignore triggers that carry no
+    # distribution label, and leftover replicas make every later suite run
+    # against an image and topology it did not ask for.
+    finally:
+    - script:
+        content: |
+          set -uo pipefail
+          kubectl delete clusterrolebinding \
+            serverless-kube-watch-trigger-distributed-rolebinding --ignore-not-found
+          kubectl delete clusterrole \
+            serverless-kube-watch-trigger-distributed-role --ignore-not-found
+          kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --type=strategic \
+            -p '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"manager","args":["--leader-elect","--health-probe-bind-address=:8081"]}]}}}}'
+          kubectl rollout status deployment/serverless-kube-watch-trigger-controller-manager \
+            -n serverless-kube-watch-trigger-system --timeout=300s
   - name: Create webhook backend
     try:
     - apply:

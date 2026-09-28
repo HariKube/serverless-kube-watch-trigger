@@ -184,3 +184,79 @@ func TestClearLeaseRemovesAnnotation(t *testing.T) {
 		t.Fatalf("expected unrelated annotation to remain, got %#v", updated.Annotations)
 	}
 }
+
+// transientConflictClient conflicts the first failures patches and then
+// delegates, standing in for the optimistic-lock collisions a reconcile causes
+// when the annotation patch races with its own status write.
+type transientConflictClient struct {
+	client.Client
+	failures int
+	calls    int
+}
+
+func (c *transientConflictClient) Patch(
+	ctx context.Context,
+	obj client.Object,
+	patch client.Patch,
+	opts ...client.PatchOption,
+) error {
+	c.calls++
+	if c.calls <= c.failures {
+		return apierrors.NewConflict(
+			schema.GroupResource{Group: "", Resource: "configmaps"},
+			obj.GetName(),
+			errors.New("conflict"),
+		)
+	}
+
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+func TestClearLeaseRetriesTransientConflicts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      "test",
+		Namespace: "default",
+		Annotations: map[string]string{
+			AnnotationKey: time.Now().UTC().Format(time.RFC3339),
+		},
+	}}
+	cl := &transientConflictClient{Client: fake.NewClientBuilder().WithObjects(cm).Build(), failures: 2}
+
+	if err := ClearLease(ctx, cl, cm); err != nil {
+		t.Fatalf("ClearLease returned error: %v", err)
+	}
+	if cl.calls != 3 {
+		t.Fatalf("expected 3 patch attempts, got %d", cl.calls)
+	}
+
+	updated := &corev1.ConfigMap{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(cm), updated); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if _, ok := updated.Annotations[AnnotationKey]; ok {
+		t.Fatalf("expected lock annotation to be removed, got %#v", updated.Annotations)
+	}
+}
+
+func TestTryAcquireLeaseRetriesTransientConflicts(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"}}
+	cl := &transientConflictClient{Client: fake.NewClientBuilder().WithObjects(cm).Build(), failures: 2}
+
+	result, err := TryAcquireLease(ctx, cl, cm, now, 30*time.Second)
+	if err != nil {
+		t.Fatalf("TryAcquireLease returned error: %v", err)
+	}
+	if !result.Acquired {
+		t.Fatalf("expected the lease to be acquired after retrying, got %#v", result)
+	}
+	if cl.calls != 3 {
+		t.Fatalf("expected 3 patch attempts, got %d", cl.calls)
+	}
+}

@@ -511,28 +511,33 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			patched.Status.ErrorResourceVersion = "42"
 			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
 
-			// handleTriggerWatcherError removes the failed watcher from the map.
-			r.runningTriggersLock.Lock()
-			delete(r.runningTriggers, nsn.String())
-			r.runningTriggersLock.Unlock()
+			// Simulate the failed watcher being removed and stopped before recovery.
+			r.stopRunningTrigger(nsn.String())
+			sessionLease := newTriggerSessionLease("httptrigger", latest, nsn.String(), latest.Spec.LockDuration.Duration)
+			Eventually(func() bool {
+				err := k8sClient.Delete(bgCtx, &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: sessionLease.name, Namespace: ns}})
+				return err == nil || errors.IsNotFound(err)
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 
 			// Second reconcile - recovery restart: the watcher must be
 			// re-established and the trigger must report Running again (with
 			// the last failure retained for diagnostics) so users can tell the
 			// trigger is healthy rather than stuck.
-			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
-			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+				g.Expect(err).NotTo(HaveOccurred())
 
-			r.runningTriggersLock.Lock()
-			Expect(r.runningTriggers).To(HaveKey(nsn.String()))
-			r.runningTriggersLock.Unlock()
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+				g.Expect(r.runningTriggers).To(HaveKey(nsn.String()))
 
-			updated := &triggersv1.HTTPTrigger{}
-			Expect(k8sClient.Get(bgCtx, nsn, updated)).To(Succeed())
-			Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
-			Expect(updated.Status.ErrorReason).To(Equal("retry failed: status code is 500"))
-			Expect(updated.Status.ErrorTime.IsZero()).To(BeFalse())
-			Expect(updated.Status.ErrorResourceVersion).To(Equal("42"))
+				updated := &triggersv1.HTTPTrigger{}
+				g.Expect(k8sClient.Get(bgCtx, nsn, updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
+				g.Expect(updated.Status.ErrorReason).To(Equal("retry failed: status code is 500"))
+				g.Expect(updated.Status.ErrorTime.IsZero()).To(BeFalse())
+				g.Expect(updated.Status.ErrorResourceVersion).To(Equal("42"))
+			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 		})
 	})
 
@@ -1388,17 +1393,21 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			patched.Status.ErrorResourceVersion = "0"
 			Expect(k8sClient.Status().Patch(bgCtx, patched, client.MergeFrom(latest))).To(Succeed())
 
-			r.runningTriggersLock.Lock()
-			delete(r.runningTriggers, nsn.String())
-			r.runningTriggersLock.Unlock()
+			r.stopRunningTrigger(nsn.String())
+			sessionLease := newTriggerSessionLease("httptrigger", latest, nsn.String(), latest.Spec.LockDuration.Duration)
+			Eventually(func() bool {
+				err := k8sClient.Delete(bgCtx, &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: sessionLease.name, Namespace: ns}})
+				return err == nil || errors.IsNotFound(err)
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
 
-			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
-			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+				g.Expect(err).NotTo(HaveOccurred())
 
-			updated := &triggersv1.HTTPTrigger{}
-			Expect(k8sClient.Get(bgCtx, nsn, updated)).To(Succeed())
-			Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
-			Expect(updated.Status.ErrorReason).To(Equal("old failure"))
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+				g.Expect(r.runningTriggers).To(HaveKey(nsn.String()))
+			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 
 			// A fresh delivery failure in the recovered session must overwrite
 			// the retained latch and flip the phase back to Error.
@@ -1408,21 +1417,16 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			Expect(k8sClient.Create(bgCtx, cm)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(bgCtx, cm) })
 
+			updated := &triggersv1.HTTPTrigger{}
 			Eventually(func() string {
 				_ = k8sClient.Get(bgCtx, nsn, updated)
 				return updated.Status.ErrorReason
 			}, 30*time.Second, 500*time.Millisecond).Should(ContainSubstring("status code is 500"))
 
-			// The error status write triggers a recovery reconcile (as the
-			// manager's status watch would), which reports Running while
-			// retaining the updated failure detail.
-			_, err = r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
-			Expect(err).NotTo(HaveOccurred())
-
 			Eventually(func() triggersv1.TriggerPhase {
 				_ = k8sClient.Get(bgCtx, nsn, updated)
 				return updated.Status.Phase
-			}, 30*time.Second, 500*time.Millisecond).Should(Equal(triggersv1.TriggerPhaseRunning))
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(triggersv1.TriggerPhaseError))
 			Expect(updated.Status.ErrorReason).To(ContainSubstring("status code is 500"))
 		})
 	})
@@ -1724,21 +1728,14 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 		})
 	})
 
-	Context("Annotation lease", func() {
-		It("requeues while an active annotation lease is present using the trigger-specific lock duration", func() {
+	Context("Session lease", func() {
+		It("requeues while another replica holds the session lease using the trigger-specific lock duration", func() {
 			const (
-				name                = "httptrigger-active-lease"
+				name                = "httptrigger-active-session-lease"
 				triggerLockDuration = 5 * time.Second
 			)
-			lockedAt := time.Now().UTC()
 			trigger := &triggersv1.HTTPTrigger{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      name,
-					Namespace: ns,
-					Annotations: map[string]string{
-						lease.AnnotationKey: lockedAt.Format(time.RFC3339),
-					},
-				},
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 				Spec: triggersv1.HTTPTriggerSpec{
 					TriggerSpec: triggersv1.TriggerSpec{
 						Resource:     metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
@@ -1750,6 +1747,17 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			}
 			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
 			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+
+			sessionLease := newTriggerSessionLease("httptrigger", trigger, ns+"/"+name, triggerLockDuration)
+			leaseObj := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: sessionLease.name, Namespace: ns},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("other-pod/httptrigger/external"),
+					LeaseDurationSeconds: ptr.To(int32(5)),
+					RenewTime:            ptr.To(metav1.NewMicroTime(time.Now().UTC())),
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, leaseObj)).To(Succeed())
 
 			r := newReconciler()
 
@@ -1764,8 +1772,8 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			Expect(running).To(BeFalse())
 		})
 
-		It("clears the annotation lease after a successful reconcile", func() {
-			const name = "httptrigger-clear-lease"
+		It("creates a durable session lease after a successful reconcile", func() {
+			const name = "httptrigger-session-lease-created"
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
@@ -1785,6 +1793,7 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
 			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
 
+			expectedLease := newTriggerSessionLease("httptrigger", trigger, ns+"/"+name, trigger.Spec.LockDuration.Duration)
 			r := newReconciler()
 
 			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}})
@@ -1794,11 +1803,13 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 				updated := &triggersv1.HTTPTrigger{}
 				g.Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: name, Namespace: ns}, updated)).To(Succeed())
 				g.Expect(updated.Status.Phase).To(Equal(triggersv1.TriggerPhaseRunning))
-				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
+				leaseObj := &coordinationv1.Lease{}
+				g.Expect(k8sClient.Get(bgCtx, types.NamespacedName{Name: expectedLease.name, Namespace: ns}, leaseObj)).To(Succeed())
+				g.Expect(leaseObj.Spec.HolderIdentity).NotTo(BeNil())
 			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
 		})
 
-		It("clears a stale annotation lease even when the trigger is already running", func() {
+		It("clears a stale legacy annotation lease even when the trigger is already running", func() {
 			const name = "httptrigger-clear-stale-lease"
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
@@ -1841,6 +1852,42 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 				g.Expect(updated.Status.LastGeneration).To(Equal(updated.Generation))
 				g.Expect(updated.Annotations).NotTo(HaveKey(lease.AnnotationKey))
 			}, 5*time.Second, 100*time.Millisecond).Should(Succeed())
+		})
+	})
+
+	Context("Session lease coordination", func() {
+		It("does not start a watcher session from WatchInit while another replica holds the session lease", func() {
+			const name = "httptrigger-watchinit-active-session-lease"
+			trigger := &triggersv1.HTTPTrigger{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: triggersv1.HTTPTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{
+						Resource:   metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"},
+						Namespaces: []string{ns},
+					},
+					HTTP: triggersv1.HTTP{URL: triggersv1.URL{Static: ptr.To("http://example.invalid")}, Method: "POST"},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			DeferCleanup(func() { cleanupTrigger(bgCtx, name) })
+
+			sessionLease := newTriggerSessionLease("httptrigger", trigger, ns+"/"+name, trigger.Spec.LockDuration.Duration)
+			leaseObj := &coordinationv1.Lease{
+				ObjectMeta: metav1.ObjectMeta{Name: sessionLease.name, Namespace: ns},
+				Spec: coordinationv1.LeaseSpec{
+					HolderIdentity:       ptr.To("other-pod/httptrigger/external"),
+					LeaseDurationSeconds: ptr.To(int32(30)),
+					RenewTime:            ptr.To(metav1.NewMicroTime(time.Now().UTC())),
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, leaseObj)).To(Succeed())
+
+			r := newReconciler()
+			Expect(r.WatchInit(bgCtx)).To(Succeed())
+
+			r.runningTriggersLock.Lock()
+			defer r.runningTriggersLock.Unlock()
+			Expect(r.runningTriggers).NotTo(HaveKey(ns + "/" + name))
 		})
 	})
 

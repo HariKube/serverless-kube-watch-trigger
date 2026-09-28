@@ -32,9 +32,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
 )
 
 const trueString = "true"
@@ -46,17 +48,80 @@ const (
 	urlTemplateName    = "url_template"
 	uriTemplateName    = "uri_template"
 
-	triggerEventReasonWatcherClosed     = "WatcherClosed"
-	triggerEventReasonCallSucceeded     = "TriggerCallSucceeded"
-	triggerEventReasonCallFailed        = "TriggerCallFailed"
-	triggerEventTypeCallFailed          = corev1.EventTypeWarning
-	triggerEventTypeCallSucceeded       = corev1.EventTypeNormal
-	triggerEventTypeWatcherClosed       = corev1.EventTypeWarning
-	triggerEventsEnabledFlagDescription = "If set, emit Kubernetes Events for trigger endpoint call successes, failures, and watcher closures."
+	triggerEventReasonWatcherClosed = "WatcherClosed"
+	triggerEventReasonCallFailed    = "TriggerCallFailed"
+	triggerEventTypeCallFailed      = corev1.EventTypeWarning
+	triggerEventTypeWatcherClosed   = corev1.EventTypeWarning
 )
 
 type kubeGetter interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
+}
+
+// acquireAnnotationLease claims the opt-in per-trigger reconcile lease that is
+// stored on the trigger itself as triggers.harikube.info/lock-timestamp. It is
+// only used when spec.lockDuration is set; a zero duration disables annotation
+// locking entirely and the reconcile is not serialized across replicas.
+//
+// The returned result is non-nil when the lease is currently held by somebody
+// else and the reconcile has to be requeued. On success the caller must hand
+// the lease back with lease.ClearLease once the trigger reached its target
+// state, otherwise the lease is left to expire on its own.
+func acquireAnnotationLease(
+	ctx context.Context,
+	logger logr.Logger,
+	cl client.Client,
+	obj client.Object,
+	lockDuration time.Duration,
+) (bool, *ctrl.Result, error) {
+	if lockDuration <= 0 {
+		return false, nil, nil
+	}
+
+	leaseResult, err := lease.TryAcquireLease(ctx, cl, obj, time.Now().UTC(), lockDuration)
+	if err != nil {
+		logger.Error(err, "Trigger annotation lease acquisition failed", "annotation", lease.AnnotationKey)
+
+		return false, nil, err
+	}
+	if leaseResult.RequeueAfter > 0 {
+		logger.V(1).Info("Trigger annotation lease still active, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", leaseResult.RequeueAfter.String())
+
+		return false, &ctrl.Result{RequeueAfter: leaseResult.RequeueAfter}, nil
+	}
+	if leaseResult.Conflict {
+		retryAfter := lease.ConflictRetryDelay()
+		logger.V(1).Info("Trigger annotation lease was won by another replica, requeueing", "annotation", lease.AnnotationKey, "requeueAfter", retryAfter.String())
+
+		return false, &ctrl.Result{RequeueAfter: retryAfter}, nil
+	}
+
+	return leaseResult.Acquired, nil, nil
+}
+
+// releaseAnnotationLease hands a lease acquired by acquireAnnotationLease back.
+func releaseAnnotationLease(ctx context.Context, logger logr.Logger, cl client.Client, obj client.Object) error {
+	if err := lease.ClearLease(ctx, cl, obj); err != nil {
+		logger.Error(err, "Trigger annotation lease release failed", "annotation", lease.AnnotationKey)
+
+		return err
+	}
+
+	return nil
+}
+
+// clearExpiredAnnotationLease drops an annotation lease that was left behind by
+// a reconcile which never released it. A lease that is still valid is kept so a
+// replica that is currently mid-reconcile does not lose its claim.
+func clearExpiredAnnotationLease(ctx context.Context, logger logr.Logger, cl client.Client, obj client.Object, lockDuration time.Duration) error {
+	if _, ok := obj.GetAnnotations()[lease.AnnotationKey]; !ok {
+		return nil
+	}
+	if remaining := lease.ActiveLeaseRemaining(obj, time.Now().UTC(), lockDuration); remaining > 0 {
+		return nil
+	}
+
+	return releaseAnnotationLease(ctx, logger, cl, obj)
 }
 
 func toJson(v any) string {
