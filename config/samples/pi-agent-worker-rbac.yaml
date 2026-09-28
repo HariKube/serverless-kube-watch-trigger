@@ -1,0 +1,70 @@
+# Example built-in ServiceAccount and RBAC for PiTrigger worker Jobs that use hack/pi-agent helpers.
+#
+# Apply this in the same namespace as your PiTrigger resources and reference:
+#   spec.agent.serviceAccountName: pi-agent-worker
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pi-agent-worker
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pi-agent-worker
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["triggers.harikube.info"]
+    resources: ["pitriggers"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pi-agent-worker
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: pi-agent-worker
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pi-agent-worker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pi-agent-worker-discovery
+rules:
+  - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pi-agent-worker-discovery
+subjects:
+  - kind: ServiceAccount
+    name: pi-agent-worker
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pi-agent-worker-discovery

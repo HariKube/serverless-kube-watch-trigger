@@ -5,6 +5,7 @@ resources:
 - pi-agent-config-secret.yaml
 - pi-agent-prompts-configmap.yaml
 - pi-agent-skills-configmap.yaml
+- pi-agent-worker-rbac.yaml
 - triggers_v1_pi_minimal.yaml
 - triggers_v1_pi_full.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

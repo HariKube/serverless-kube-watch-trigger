@@ -1,0 +1,42 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: node-notready-self-heal
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: Node
+  eventTypes:
+    - MODIFIED
+  concurrency: 1
+  maxJobs: 1
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 45s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - npm:pi-graft
+    timeout: 15m
+    prompt: |-
+      You are a Kubernetes node self-healing agent.
+
+      Load the runtime skills first. Confirm the watched Node is currently NotReady or Ready=Unknown before acting; if the node is already healthy again, write a short note and exit cleanly.
+
+      When the node is unhealthy, investigate recent node conditions, taints, related Events, leases, and Pods scheduled on the node. Prefer the safest actions first: record useful Events, gather evidence, and recommend or perform narrow remediation only when the cause is clear and RBAC allows it.
+
+      Good examples of safe remediation are: cordon the node, identify obviously broken Pods on that node, surface kubelet/runtime/network symptoms, and produce a concise operator handoff when human action is required.
+
+      Never perform broad destructive actions without strong evidence.

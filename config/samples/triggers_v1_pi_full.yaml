@@ -35,9 +35,10 @@ spec:
     skillsConfigMapRef:
       name: pi-agent-skills
     imagePullPolicy: IfNotPresent
-    serviceAccountName: pi-trigger-runner
+    serviceAccountName: pi-agent-worker
     provider: freetoken
     model: gtp-oss-20b
+    prompt: "You are the spawned worker; prepend all responses with concise guidance." # Optional: base prompt prefix sent to the spawned worker (becomes the worker's prompt).
     workingDir: /workspace
     noExtensions: true
     extensions:

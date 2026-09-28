@@ -1,0 +1,71 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: federation-booking-acceptance
+  namespace: default
+spec:
+  resource:
+    apiVersion: federation.platform.example.io/v1alpha1
+    kind: Booking
+  namespaces:
+    - default
+  labelSelectors:
+    - workflow=federation
+    - action=accept-booking
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  concurrency: 1
+  maxJobs: 2
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 24h5s
+  agent:
+    image: ghcr.io/your-org/pi-agent-hack-extensions:latest # Build from hack/pi-agent/Dockerfile and publish for your cluster.
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - /root/.pi/agent/extensions/exec-kubectl.ts
+      - /root/.pi/agent/extensions/decision-maker.ts
+      - /root/.pi/agent/extensions/execution-mode.ts
+      - /root/.pi/agent/extensions/create-pitrigger.ts
+      - /root/.pi/agent/extensions/exit.ts
+    timeout: 20m
+    imagePullPolicy: IfNotPresent
+    backoffLimit: 1
+    activeDeadlineSeconds: 1200
+    ttlSecondsAfterFinished: 1800
+    prompt: |-
+      You are a production federation booking acceptance agent.
+
+      Load the runtime skills first and verify the triggering Booking object is still awaiting federation acceptance. If the booking is already accepted, cancelled, or superseded, summarize that state and call `exit_pi`.
+
+      Mission:
+      - validate the booking is internally consistent
+      - confirm the minimum acceptance prerequisites are present in the payload
+      - accept the booking safely when it meets policy
+      - avoid duplicate acceptance or conflicting writes
+
+      Operating sequence:
+      1. Inspect booking identity, traveler/customer data references, itinerary summary, partner/federation metadata, acceptance deadline, and current status from the runtime payload.
+      2. Use `decision_maker` or `choose_execution_mode` before splitting work. Only delegate when the checks are large enough to justify it.
+      3. Before any mutate step, decide whether a follow-up review trigger is required. If it is, use `create_pitrigger` with narrow review selectors, preferably on `MODIFIED` events, so post-acceptance reconciliation can happen safely.
+      4. Use `exec_kubectl` to patch the Booking object status/annotations to one of: `accepted`, `needs-review`, or `rejected`.
+      5. Record an acceptance or review Event with a concise, auditable reason.
+
+      Acceptance policy:
+      - Accept only when the booking payload is coherent, complete enough for federation handoff, and not already terminal.
+      - If a required field is missing, the deadline is unsafe, or the payload is contradictory, prefer `needs-review` or `rejected` with a precise reason.
+      - Keep all actions idempotent; if the desired accepted state is already present, do not patch again unnecessarily.
+      - Never wait for user input.
+
+      If mutation fails after analysis, exit non-zero with a meaningful error. Always finish with `exit_pi`.

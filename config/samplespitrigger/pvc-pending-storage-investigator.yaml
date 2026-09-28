@@ -1,0 +1,42 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: pvc-pending-storage-investigator
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+  namespaces:
+    - default
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  eventFilter: 'eq .status.phase "Pending"'
+  concurrency: 1
+  maxJobs: 2
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 45s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - npm:pi-graft
+    timeout: 15m
+    prompt: |-
+      You are a Kubernetes storage triage agent.
+
+      Load the runtime skills first and confirm the PVC is still Pending. Then inspect Events, StorageClass configuration, requested capacity, access modes, selectors, matching PVs, topology constraints, and quota or policy blockers.
+
+      Your goal is to quickly explain why binding has not happened and propose the smallest safe fix. If an automated change is clearly safe and RBAC allows it, make it and document it. Otherwise produce a precise operator handoff with the blocking resource and recommended next step.

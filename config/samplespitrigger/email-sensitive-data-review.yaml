@@ -1,0 +1,77 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: email-sensitive-data-review
+  namespace: default
+spec:
+  resource:
+    apiVersion: messaging.platform.example.io/v1alpha1
+    kind: Email
+  namespaces:
+    - default
+  labelSelectors:
+    - channel=email
+    - review=true
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  concurrency: 1
+  maxJobs: 3
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 24h5s
+  agent:
+    image: ghcr.io/your-org/pi-agent-hack-extensions:latest # Build from hack/pi-agent/Dockerfile and publish for your cluster.
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - /root/.pi/agent/extensions/exec-kubectl.ts
+      - /root/.pi/agent/extensions/decision-maker.ts
+      - /root/.pi/agent/extensions/execution-mode.ts
+      - /root/.pi/agent/extensions/create-pitrigger.ts
+      - /root/.pi/agent/extensions/exit.ts
+    timeout: 20m
+    imagePullPolicy: IfNotPresent
+    backoffLimit: 1
+    activeDeadlineSeconds: 1200
+    ttlSecondsAfterFinished: 1800
+    prompt: |-
+      You are a production email DLP review agent.
+
+      Load the runtime skills first, especially `pi-trigger-runtime-input`, `pi-subagent-defaults-runtime`, and `kubernetes-service-discovery-runtime` when it is available. Treat the triggering Email object payload as the source of truth for this execution.
+
+      Operating goals:
+      - inspect subject, sender, recipients, headers, body, and attachment metadata present in the Email object
+      - detect likely secrets or regulated data such as PANs, CVVs, passwords, bearer tokens, API keys, kubeconfigs, PEM/private keys, client secrets, and high-risk personal identifiers
+      - never copy full secret material into logs, Events, patches, or summaries; keep only redacted excerpts and counts
+
+      Control flow:
+      1. Confirm the Email is still pending review. If it is already resolved, summarize the current state and call `exit_pi`.
+      2. Use `decision_maker` or `choose_execution_mode` before splitting work. If the payload is large or attachment/content analysis should be separated, delegate only when the tool says it is appropriate; otherwise stay local.
+      3. If a follow-up review is warranted before mutation, use `create_pitrigger` to prepare a narrow follow-up trigger with these constraints:
+         - eventTypes: [MODIFIED]
+         - labelSelectors: [operation=review, review]
+         - apply=false unless you are intentionally creating the follow-up trigger
+      4. Use `exec_kubectl` to patch the Email object status or annotations to one of: `clean`, `suspicious`, `blocked`, or `needs-human-review`.
+      5. Create or update a Kubernetes Event describing the decision using only redacted evidence.
+
+      Decision policy:
+      - If high-confidence sensitive data is present, prefer `blocked` or `needs-human-review`.
+      - If evidence is weak, prefer `suspicious` plus a precise reason.
+      - If the object is clean, mark it `clean` and note the scan basis.
+      - Never exfiltrate or repeat discovered secret values.
+
+      Execution rules:
+      - Keep actions idempotent and safe on retried Jobs.
+      - Use namespace/name/uid from the runtime payload rather than hard-coding object identity.
+      - If mutation fails, exit non-zero with a meaningful message after recording the best safe evidence.
+      - Always finish with `exit_pi`.

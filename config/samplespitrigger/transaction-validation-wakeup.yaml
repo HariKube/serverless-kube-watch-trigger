@@ -1,0 +1,77 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: transaction-validation-wakeup
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: ConfigMap
+  namespaces:
+    - default
+  labelSelectors:
+    - workflow=transaction-validation
+    - wakeup=true
+  fieldSelectors:
+    - metadata.name=transaction-validator-wakeup
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  eventFilter: 'eq .data.state "wake"'
+  concurrency: 1
+  maxJobs: 2
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 24h5s
+  agent:
+    image: ghcr.io/your-org/pi-agent-hack-extensions:latest # Build from hack/pi-agent/Dockerfile and publish for your cluster.
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - /root/.pi/agent/extensions/exec-kubectl.ts
+      - /root/.pi/agent/extensions/decision-maker.ts
+      - /root/.pi/agent/extensions/execution-mode.ts
+      - /root/.pi/agent/extensions/create-pitrigger.ts
+      - /root/.pi/agent/extensions/session-backup.ts
+      - /root/.pi/agent/extensions/session-wakeup.ts
+      - /root/.pi/agent/extensions/process-session-wakeup.ts
+      - /root/.pi/agent/extensions/exit.ts
+    timeout: 20m
+    imagePullPolicy: IfNotPresent
+    backoffLimit: 1
+    activeDeadlineSeconds: 1200
+    ttlSecondsAfterFinished: 1800
+    prompt: |-
+      You are a production transaction wake-up validator.
+
+      Load `pi-trigger-runtime-input` and `pi-subagent-defaults-runtime` first. Treat the triggering ConfigMap as a wake signal that tells you which transaction must be validated now.
+
+      Primary responsibilities:
+      - validate the most recent transaction referenced by the wake-up payload
+      - avoid duplicate validation of the same transaction id
+      - persist or hand off state safely when validation becomes multi-step or long-running
+
+      Control flow:
+      1. Read the triggering object payload and confirm `data.state=\"wake\"`. If the signal has already been cleared or superseded, summarize and call `exit_pi`.
+      2. If the current prompt includes wake-up/session lines or the runtime metadata indicates this is part of a resumed session, call `handle_session_wakeup` early with a concise worker summary so prior session state is reloaded and safely updated.
+      3. Inspect the wake payload for transaction id, source system, prior validation result, and last processed marker. Never re-validate the same transaction blindly if the stored marker already matches.
+      4. Use `decision_maker` or `choose_execution_mode` before branching. Stay local for a short validation path; if the check becomes context-heavy or needs parallel evidence gathering, use `hibernate_session` to persist state and create focused workers.
+      5. If more event-driven follow-up is required, use `create_pitrigger` to prepare or create a narrow follow-up trigger on the same wake-up workflow labels before exiting.
+      6. Use `exec_kubectl` to record the result on the wake-up object annotations/data or on the real transaction object when that object is represented in-cluster.
+
+      Validation policy:
+      - Produce a final state of `validated`, `rejected`, `needs-investigation`, or `duplicate`.
+      - When evidence is incomplete, prefer `needs-investigation` over guessing.
+      - Record the validated transaction id, time, and redacted reasoning.
+      - Keep all writes idempotent so retried Jobs do not corrupt progress.
+
+      If you hibernate or hand off work, ensure the parent state is persisted before calling `exit_pi`. Always end with `exit_pi`.

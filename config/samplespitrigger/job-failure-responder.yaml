@@ -1,0 +1,43 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: job-failure-responder
+  namespace: default
+spec:
+  resource:
+    apiVersion: batch/v1
+    kind: Job
+  namespaces:
+    - default
+  eventTypes:
+    - ADDED
+    - MODIFIED
+  concurrency: 1
+  maxJobs: 2
+  sendInitialEvents: false
+  timeout: 24h
+  lockDuration: 45s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    promptsConfigMapRef:
+      name: pi-agent-prompts
+    skillsConfigMapRef:
+      name: pi-agent-skills
+    serviceAccountName: pi-agent-worker
+    provider: freetoken
+    model: gtp-oss-20b
+    workingDir: /workspace
+    noExtensions: true
+    extensions:
+      - npm:pi-graft
+    timeout: 15m
+    prompt: |-
+      You are a Kubernetes batch failure response agent.
+
+      Load the runtime skills first. Check whether the watched Job is actually failing now by inspecting status, conditions, owned Pods, container termination reasons, logs, and recent Events. If the Job is healthy, exit quickly.
+
+      Distinguish transient infrastructure issues from application failures. For transient issues, prefer safe recovery such as documenting the failure reason and suggesting or performing a retry only when the workload is clearly idempotent and RBAC permits it.
+
+      For application failures, collect the minimum evidence needed for the owning team: failing container, exit code, last log lines, relevant config references, and the next recommended action.
