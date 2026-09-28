@@ -36,7 +36,7 @@ function decodeBase64Object(envName: string, requiredKeys: string[]) {
 function renderRuntimeInputSkill(input: any) {
   return `---
 name: ${PI_TRIGGER_RUNTIME_SKILL}
-description: Provides the current PiTrigger event payload and trigger metadata decoded from the injected runtime environment. Use when handling a PiTrigger-triggered worker job or when you need trigger, session, or job identity for the current execution.
+description: Provides the current PiTrigger triggering object payload and trigger metadata decoded from the injected runtime environment. Use when handling a PiTrigger-triggered worker job or when you need trigger, session, or job identity for the current execution.
 ---
 
 # PiTrigger runtime input
@@ -46,9 +46,11 @@ Treat the structured data below as the source of truth for this execution.
 
 ## Rules
 
-- Do not look for mounted \`event.json\` or \`metadata.json\` files; this runtime injects PiTrigger input through the environment instead.
+- Do not look for mounted \`payload.json\` or \`metadata.json\` files; this runtime injects PiTrigger input through the environment instead.
 - Use the decoded metadata below for job/session identity, output-location routing, and wake-up/restore decisions, especially with higher-level tools like \`handle_session_wakeup\`.
 - Treat the environment variable itself as an implementation detail; rely on this decoded skill content instead of re-decoding it.
+- Strongly separate the triggering object payload (the raw resource/object captured by the watch) from the trigger/session/job metadata below; do not conflate fields from \`payload\` with \`metadata\`.
+- Do not wait for user clarification or prompt for interactive input; if the worker is blocked or uncertain it must call the \`decision_maker\` tool, then continue executing according to that decision and keep working autonomously until the task is solved or the job reaches \`TIMED_OUT\`.
 
 ## Trigger metadata
 
@@ -56,10 +58,10 @@ Treat the structured data below as the source of truth for this execution.
 ${JSON.stringify(input.metadata, null, 2)}
 \`\`\`
 
-## Trigger event
+## Trigger payload
 
 \`\`\`json
-${JSON.stringify(input.event, null, 2)}
+${JSON.stringify(input.payload, null, 2)}
 \`\`\`
 `;
 }
@@ -83,6 +85,7 @@ Treat the structured JSON below as the canonical starting \`subAgentDefaults\` o
 - Do not rewrite \`agent\` by hand unless the task explicitly requires changing worker runtime settings.
 - Prefer the higher-level orchestration tools over low-level helpers such as \`prepare_session_hibernation\` unless you are debugging the hibernation planner itself.
 - Treat the environment variable itself as an implementation detail; rely on this decoded skill content instead of re-decoding it.
+- Do not wait for user clarification or prompt for interactive input; if the worker is blocked or uncertain it must call the `decision_maker` tool, then continue executing according to that decision and keep working autonomously until the task is solved or the job reaches `TIMED_OUT`.
 
 ## Canonical sub-agent defaults
 
@@ -104,7 +107,7 @@ function writeSkill(rootDir: string, skillName: string, content: string) {
 }
 
 export default function registerPiTriggerInput(pi: any) {
-  const input = decodeBase64Object(PI_TRIGGER_INPUT_ENV, ['event', 'metadata']);
+  const input = decodeBase64Object(PI_TRIGGER_INPUT_ENV, ['payload', 'metadata']);
   const subAgentDefaults = decodeBase64Object(PI_SUBAGENT_DEFAULTS_ENV, ['agent']);
 
   if (typeof subAgentDefaults.namespace !== 'string' || !subAgentDefaults.namespace.trim()) {

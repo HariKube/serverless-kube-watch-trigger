@@ -7,6 +7,7 @@ import {
   processSessionWakeup
 } from './session-lib.mjs';
 import { execKubectlCommand, isConflict } from './kubectl-lib.mjs';
+import { applyPiTriggerManifests, buildPiTriggerManifest } from './pitrigger-lib.mjs';
 
 const PI_SUBAGENT_DEFAULTS_ENV = 'PI_SUBAGENT_DEFAULTS_BASE64';
 
@@ -113,13 +114,29 @@ export function chooseExecutionMode({
         ? 'Use headless execution because the work is still a single bounded stream but would otherwise consume too much parent context.'
         : decision.reason;
 
+  // If delegation was chosen and the decision exposed a derived sub-agent timeout, propagate that
+  // timeout into the resolved sub-agent defaults so both the PiTrigger controller timeout
+  // (piTriggerTimeout) and the worker runtime (agent.timeout) reflect the derived value.
+  const propagatedSubAgentDefaults = (() => {
+    if (selectedMode !== 'delegate' || !resolvedDefaults || decision.subagentTimeoutMinutes === undefined) {
+      return resolvedDefaults;
+    }
+    const minutes = decision.subagentTimeoutMinutes;
+    const duration = `${minutes}m`;
+    const modified = clone(resolvedDefaults);
+    modified.piTriggerTimeout = duration;
+    modified.agent = modified.agent || {};
+    modified.agent.timeout = duration;
+    return modified;
+  })();
+
   return {
     ...decision,
     selectedMode,
     modeReason,
     defaultsSource: defaultsResult.source,
     cleanedPrompt: defaultsResult.cleanedPrompt,
-    subAgentDefaults: resolvedDefaults,
+    subAgentDefaults: propagatedSubAgentDefaults,
     maxParallel: resolvedMaxParallel,
     workerTimeout: resolvedWorkerTimeout,
     contextHeavy: Boolean(contextHeavy),
@@ -350,7 +367,7 @@ export async function hibernateSession(
     }
   }
 
-  const triggerWrite = await applyObjects(prepared.triggerManifests, prepared.namespace, kubectl);
+  const triggerWrite = await applyPiTriggerManifests(prepared.triggerManifests, prepared.namespace, kubectl);
   if (triggerWrite) {
     operations.push({ type: 'apply-triggers', commandExecuted: triggerWrite.commandExecuted });
   }
@@ -360,6 +377,85 @@ export async function hibernateSession(
     defaultsSource: defaultsResult.source,
     operations,
     ...prepared
+  };
+}
+
+export async function createPiTrigger(
+  {
+    prompt = '',
+    fallbackNamespace = 'default',
+    subAgentDefaults,
+    name,
+    namespace,
+    labels,
+    annotations,
+    ownerReferences,
+    resource,
+    namespaces,
+    labelSelectors,
+    fieldSelectors,
+    eventTypes,
+    eventFilter,
+    sendInitialEvents,
+    maxJobs,
+    timeout,
+    provider,
+    model,
+    serviceAccountName,
+    agent,
+    apply = true
+  },
+  { kubectl = execKubectlCommand, env = process.env } = {}
+) {
+  const defaultsResult =
+    subAgentDefaults !== undefined || prompt
+      ? resolveSubagentDefaults({
+          prompt,
+          fallbackNamespace,
+          subAgentDefaults,
+          env
+        })
+      : { found: false, source: 'none', cleanedPrompt: prompt, subAgentDefaults: undefined };
+
+  const resolvedNamespace = namespace ?? defaultsResult.subAgentDefaults?.namespace ?? fallbackNamespace;
+  const inheritedAgent = defaultsResult.subAgentDefaults?.agent;
+  if (!inheritedAgent && !agent) {
+    throw new Error('agent is required when sub-agent defaults do not provide one');
+  }
+  const resolvedAgent = {
+    ...(inheritedAgent ? clone(inheritedAgent) : {}),
+    ...(agent ? clone(agent) : {}),
+    ...(provider ? { provider } : {}),
+    ...(model ? { model } : {}),
+    ...(serviceAccountName ? { serviceAccountName } : {})
+  };
+
+  const manifest = buildPiTriggerManifest({
+    name,
+    namespace: resolvedNamespace,
+    labels,
+    annotations,
+    ownerReferences,
+    resource,
+    namespaces,
+    labelSelectors,
+    fieldSelectors,
+    eventTypes,
+    eventFilter,
+    sendInitialEvents,
+    maxJobs,
+    timeout,
+    agent: resolvedAgent
+  });
+
+  const write = apply ? await applyPiTriggerManifests([manifest], resolvedNamespace, kubectl) : undefined;
+
+  return {
+    status: apply ? 'created' : 'prepared',
+    defaultsSource: defaultsResult.source,
+    namespace: resolvedNamespace,
+    manifest,
+    ...(write ? { write: { type: 'apply-trigger', commandExecuted: write.commandExecuted } } : {})
   };
 }
 
@@ -377,14 +473,83 @@ export async function handleSessionWakeup(
 
   const secretJson = await getSecretByLabel(promptInfo.sessionSecretLabel, promptInfo.namespace, kubectl);
   if (promptInfo.timeout) {
-    return {
-      ...processSessionWakeup({ prompt, secretJson, workerSummary }),
-      fetched: {
-        secret: true,
-        job: false,
-        events: false
+    const jobJson = promptInfo.jobName
+      ? JSON.stringify(
+          parseMaybeJson(
+            (
+              await kubectl({
+                command: `get job ${promptInfo.jobName} -o json --ignore-not-found`,
+                namespace: promptInfo.namespace
+              })
+            ).stdout
+          )
+        )
+      : undefined;
+    const eventsJson = promptInfo.jobName
+      ? (
+          await kubectl({
+            command: `get events --field-selector involvedObject.kind=Job,involvedObject.name=${promptInfo.jobName} -o json`,
+            namespace: promptInfo.namespace
+          })
+        ).stdout
+      : undefined;
+    const podsJson = promptInfo.jobName
+      ? JSON.stringify(
+          parseMaybeJson(
+            (
+              await kubectl({
+                command: `get pods -l job-name=${promptInfo.jobName} -o json --ignore-not-found`,
+                namespace: promptInfo.namespace
+              })
+            ).stdout
+          )
+        )
+      : undefined;
+
+    let latestSecretJson = secretJson;
+    let lastConflict;
+
+    for (let attempt = 1; attempt <= Math.max(1, Math.trunc(maxAttempts || 5)); attempt += 1) {
+      const result = processSessionWakeup({ prompt, secretJson: latestSecretJson, workerSummary, jobJson, eventsJson, podsJson });
+
+      if (!(result.action === 'wait' || result.action === 'merge')) {
+        return {
+          ...result,
+          fetched: {
+            secret: true,
+            job: Boolean(promptInfo.jobName),
+            events: Boolean(promptInfo.jobName),
+            pods: Boolean(promptInfo.jobName)
+          }
+        };
       }
-    };
+
+      try {
+        const writeResult = await replaceObject(result.replacementSecretJson, promptInfo.namespace, kubectl);
+        return {
+          ...result,
+          attempts: attempt,
+          fetched: {
+            secret: true,
+            job: Boolean(promptInfo.jobName),
+            events: Boolean(promptInfo.jobName),
+            pods: Boolean(promptInfo.jobName)
+          },
+          write: {
+            type: 'replace-secret',
+            commandExecuted: writeResult.commandExecuted
+          }
+        };
+      } catch (error) {
+        if (!(attempt < maxAttempts && isConflict(error?.stderr))) {
+          throw error;
+        }
+        lastConflict = error;
+        latestSecretJson = await getSecretByLabel(promptInfo.sessionSecretLabel, promptInfo.namespace, kubectl);
+      }
+    }
+
+    throw new Error(lastConflict?.stderr || lastConflict?.message || 'failed to update session Secret');
   }
 
   const jobJson = promptInfo.jobName

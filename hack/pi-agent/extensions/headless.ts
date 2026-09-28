@@ -108,7 +108,7 @@ export default function (pi: any) {
         ? String(toolParams.model)
         : "gpt-5-mini";
 
-      const formattedPrompt = `Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
+      const formattedPrompt = `You are a headless Pi worker running without a human; you must never wait for or request user clarification or input. If you become blocked or uncertain, call the 'decision_maker' tool immediately to choose the next action, then continue executing that decision; do not treat clarification as terminal. Keep working to complete the task until you either succeed (produce a final actionable answer) or are explicitly terminated with TIMED_OUT; do not exit early for clarification-like messages. Execute the necessary tool or shell commands to complete the request below.\n\nPrompt: ${cleanPrompt}`;
 
       const extractLastOutputLines = (rawOutput: string): string => headlessOutput
         .stripAnsi(String(rawOutput || ""))
@@ -318,21 +318,7 @@ export default function (pi: any) {
             return finalizeLogAndResolve(responseFailure, { exitCode: code, stopReason: responseStopReason, toolExecutionCount }, "", outputTail);
           }
 
-          if (toolExecutionCount === 0 && looksLikeClarificationRequest(finalAnswer)) {
-            return finalizeLogAndResolve(
-              "Worker requested additional input before completing the task.",
-              {
-                status: "needs_input",
-                taskCompleted: false,
-                exitCode: code,
-                stopReason: responseStopReason,
-                toolExecutionCount,
-                needsInput: true
-              },
-              finalAnswer,
-              outputTail
-            );
-          }
+          // Note: Clarification-style outputs are no longer treated as a terminal "needs_input" condition for headless workers; the worker prompt is hardened to never wait for user input and to call decision_maker when uncertain, so continue to normal handling below.
 
           if (code !== 0 || !finalAnswer) {
             const errReason = code !== 0

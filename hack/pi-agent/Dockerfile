@@ -15,8 +15,8 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
 
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent @kubernetes/client-node@2.0.0 billion-context
 
-COPY *.md /root/.pi/agent/skills/
-COPY *.ts *.mjs /root/.pi/agent/extensions/
+COPY skills/ /root/.pi/agent/
+COPY  extensions/ /root/.pi/agent/
 
 # RUN npm install --no-package-lock --no-audit --no-fund --prefix /root/.pi/agent/extensions typebox
 

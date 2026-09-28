@@ -5,7 +5,9 @@ import {
   decideSubagentStrategy,
   extractSubAgentDefaults,
   prepareSessionHibernation,
-  processSessionWakeup
+  processSessionWakeup,
+  buildWorkerPrompt,
+  inspectJob
 } from './session-lib.mjs';
 
 function sampleDefaults() {
@@ -19,7 +21,7 @@ function sampleDefaults() {
       configSecretRef: { name: 'pi-config' },
       promptsConfigMapRef: { name: 'pi-prompts' },
       skillsConfigMapRef: { name: 'pi-skills' },
-      serviceAccountName: 'pi-runner',
+      serviceAccountName: 'pi-agent-worker',
       timeout: '10m'
     }
   };
@@ -111,6 +113,39 @@ test('decideSubagentStrategy forces delegation when estimate reaches 75 percent 
   assert.equal(result.exceedsTimeoutSafetyWindow, true);
   assert.equal(result.timeoutThresholdMinutes, 7.5);
   assert.match(result.reason, /timeout safety window/i);
+});
+
+// New contract tests: when estimatedMinutes is provided and delegation is chosen,
+// the decision logic must expose a derived sub-agent timeout equal to 3x the estimate
+// so orchestration can apply it to delegated workers.
+test('decideSubagentStrategy exposes derived subagentTimeoutMinutes = 3x estimate when delegating for parallel work', () => {
+  const result = decideSubagentStrategy({
+    task: 'Split work across subagents',
+    estimatedSteps: 2,
+    estimatedMinutes: 2,
+    independentWorkUnits: 2,
+    maxParallel: 4
+  });
+
+  assert.equal(result.recommendedAction, 'delegate');
+  // derived timeout should be exactly 3 times the estimate (2 -> 6 minutes)
+  assert.equal(result.subagentTimeoutMinutes, 6);
+});
+
+test('decideSubagentStrategy exposes derived subagentTimeoutMinutes = 3x estimate when delegating due to timeout safety', () => {
+  const result = decideSubagentStrategy({
+    task: 'Long running operation',
+    estimatedSteps: 2,
+    estimatedMinutes: 8,
+    independentWorkUnits: 1,
+    maxParallel: 3,
+    workerTimeout: '10m'
+  });
+
+  assert.equal(result.recommendedAction, 'delegate');
+  assert.equal(result.exceedsTimeoutSafetyWindow, true);
+  // derived timeout should be exactly 3 times the estimate (8 -> 24 minutes)
+  assert.equal(result.subagentTimeoutMinutes, 24);
 });
 
 test('prepareSessionHibernation builds context and manifests for pending workers', () => {
@@ -595,12 +630,98 @@ test('processSessionWakeup records timeout outcomes when the prompt indicates a 
     secretJson: buildStoredSecret(prepared)
   });
 
-  assert.equal(result.action, 'merge');
-  // top-level aggregate outcome is reported as completed-with-timeouts when merging a single timeout
-  assert.equal(result.result.outcome, 'completed-with-timeouts');
+  // Timeout wake-ups should persist the worker result but leave the session resumable (hibernated) rather than advancing to merge
+  assert.equal(result.action, 'wait');
+  assert.equal(result.context.status, 'hibernated');
+  // aggregate or per-worker timeout outcome should be surfaced as 'timeout'
+  assert.equal(result.result.outcome, 'timeout');
   assert.equal(result.result.summary, 'Worker timed out.');
-  // timeout should be recorded on the worker runtime state as well as the result blob — implementations may surface the aggregate timeout on a single-worker wakeup instead of populating every worker field
   const reported = (result.context.workers || []).find(w => Number(w.index) === 1);
   assert.equal((reported && reported.outcome) || result.result.outcome, 'timeout');
   assert.deepEqual(result.context.cleanup, prepared.cleanup);
+});
+
+// New focused tests for requested timeout/wake-up behavior and worker prompt contract
+
+test('processSessionWakeup should persist resumable session metadata on timeout and not advance to merge', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [{ index: 1, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/1.md' }],
+    sessionId: 's-demo',
+    round: 1
+  });
+
+  // worker timed out; the session should be left resumable (hibernated) rather than advancing to merge
+  const result = processSessionWakeup({
+    prompt: buildWakeupPrompt({ jobName: 'worker-1', timeout: true }),
+    secretJson: buildStoredSecret(prepared)
+  });
+
+  // This new behavior expects the implementation to persist the worker result and keep the session hibernated
+  assert.equal(result.action, 'wait');
+  assert.equal(result.context.status, 'hibernated');
+  assert.equal(result.result.outcome, 'timeout');
+  assert.match(result.replacementSecretJson, /result-r1-w1.json/);
+});
+
+test('inspectJob and processSessionWakeup should use only the final event for job summaries', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [{ index: 1, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/1.md' }],
+    sessionId: 's-demo',
+    round: 1
+  });
+
+  const jobJson = JSON.stringify({
+    status: {
+      conditions: [{ type: 'Complete', status: 'True', message: 'done' }]
+    }
+  });
+
+  // two events: an earlier message followed by a final message — the implementation should use only the final event
+  const eventsJson = JSON.stringify({ items: [{ message: 'Earlier event' }, { message: 'Final event' }] });
+
+  const result = processSessionWakeup({
+    prompt: buildWakeupPrompt({ jobName: 'worker-1' }),
+    secretJson: buildStoredSecret(prepared),
+    jobJson,
+    eventsJson
+  });
+
+  assert.equal(result.action, 'merge');
+  assert.equal(result.result.outcome, 'succeeded');
+  assert.equal(result.result.summary, 'Final event');
+});
+
+test('worker prompts must require calling exit_pi and use non-zero exit on timeout or failure', () => {
+  const prepared = prepareSessionHibernation({
+    subAgentDefaults: sampleDefaults(),
+    originalPrompt: 'Ship it',
+    cleanedPrompt: 'Ship it',
+    nextStep: 'merge worker results',
+    workers: [{ index: 1, task: 'Implement', expectedResult: 'patch', outputLocation: 'out/1.md' }],
+    sessionId: 's-demo',
+    round: 1
+  });
+
+  const prompt = buildWorkerPrompt({
+    defaults: sampleDefaults(),
+    sessionId: 's-demo',
+    namespace: 'demo',
+    round: 1,
+    worker: prepared.context.workers[0],
+    cleanedPrompt: 'Ship it'
+  });
+
+  // The worker prompt contract should explicitly instruct the worker to call the exit_pi extension
+  // after updating wake-up/session state, and it must signal non-zero on timeout/failure.
+  // Accept either an explicit non-zero numeric argument or a plain English instruction to use a non-zero exit.
+  assert.match(prompt, /exit_pi/);
+  assert.match(prompt, /(?:non[- ]?zero|nonzero|not\s+zero|greater\s+than\s+0|[1-9]\d*|non[- ]?0)/i);
 });

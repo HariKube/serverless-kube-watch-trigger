@@ -46,3 +46,24 @@ jobs:
         run: |
           go mod tidy
           make test
+
+  pi-agent:
+    name: Run pi-agent tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install devbox
+        uses: jetify-com/devbox-install-action@v0.12.0
+        with:
+          enable-cache: 'true'
+
+      - name: Running pi-agent Tests
+        run: |
+          make -C hack/pi-agent test

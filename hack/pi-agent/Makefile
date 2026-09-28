@@ -9,6 +9,9 @@ push:
 	docker push $(IMG)
 
 test:
+	@node --test extensions/*.test.mjs
+
+test-e2e:
 	@docker run -it --rm \
 		-e PI_OFFLINE=true \
 		-v $(HOME)/.pi/agent/auth.json:/root/.pi/agent/auth.json \

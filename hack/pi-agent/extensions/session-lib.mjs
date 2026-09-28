@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import {
+  PI_TRIGGER_JOB_NAME_LABEL,
+  buildWorkerPiTriggerManifest,
+  createWorkerTriggerName
+} from './pitrigger-lib.mjs';
 
 const NAME_RE = /^[a-z0-9.-]+$/;
 const LABEL_KEY_RE = /^[a-z0-9./-]+$/;
@@ -157,11 +162,6 @@ function normalizeOwnerReference(value, label) {
   };
 }
 
-function createWorkerTriggerName(sessionId, round, index) {
-  return trimKubeName(`pi-session-${randomUUID().replace(/-/g, '').slice(0, 8)}-${sessionId}-r${round}-w${index}-trigger`);
-}
-
-const PI_TRIGGER_JOB_NAME_LABEL = 'triggers.harikube.info/pitrigger-name';
 
 function buildSessionCleanup({ sessionId, namespace, secretName, round, workers }) {
   const workerCleanup = Array.isArray(workers)
@@ -208,27 +208,6 @@ function buildSessionCleanup({ sessionId, namespace, secretName, round, workers 
   };
 }
 
-function buildTerminalJobConditionFilter(index) {
-  return [
-    `(and (gt (len .status.conditions) ${index})`,
-    `(eq (index (index .status.conditions ${index}) "status") "True")`,
-    '(or',
-    `(eq (index (index .status.conditions ${index}) "type") "Complete")`,
-    `(eq (index (index .status.conditions ${index}) "type") "Failed")))`
-  ].join(' ');
-}
-
-const TERMINAL_JOB_EVENT_FILTER = [
-  'or',
-  '.status.completionTime',
-  '(and .status.conditions',
-  '(or',
-  buildTerminalJobConditionFilter(0),
-  buildTerminalJobConditionFilter(1),
-  buildTerminalJobConditionFilter(2),
-  buildTerminalJobConditionFilter(3),
-  '))'
-].join(' ');
 
 function normalizeWorker(worker, defaults, sessionId, namespace, round, cleanedPrompt, previousWorker) {
   const raw = ensureObject(worker, 'worker');
@@ -465,6 +444,8 @@ export function decideSubagentStrategy({
     reason,
     workerTimeout: workerTimeout === undefined ? undefined : ensureString(workerTimeout, 'workerTimeout'),
     timeoutThresholdMinutes,
+    // When delegation is recommended and an estimate is available, expose a derived timeout for subagents (exactly 3x the estimate).
+    subagentTimeoutMinutes: recommendedAction === 'delegate' && minutes !== undefined ? minutes * 3 : undefined,
     exceedsTimeoutSafetyWindow,
     warnings,
     checks
@@ -514,7 +495,8 @@ export function buildWorkerPrompt({ defaults, sessionId, namespace, round, worke
     worker.expectedResult ? `\nExpected Result:\n${worker.expectedResult}` : '',
     worker.outputLocation ? `\nOutput Location:\n${worker.outputLocation}` : '',
     cleanedPrompt ? `\nOriginal Prompt:\n${cleanedPrompt}` : '',
-    '\nWhen you finish, return a short summary suitable for parent-session merge.'
+    '\nWhen you finish, return a short summary suitable for parent-session merge.',
+    '\nIf you are woken due to a timeout or after a failure, persist any necessary session-state to the provided session secret (the "Session Secret Label" above); once state is safely persisted, call exit_pi with a non-zero exit code to indicate timeout/failure to the parent session. On successful completion, exit normally (exit_pi may be used with a zero exit code).'
   ]
     .filter(Boolean)
     .join('\n');
@@ -694,39 +676,19 @@ export function prepareSessionHibernation({
   const leaseManifests = [];
 
   const triggerManifests = triggerOwnerReferences
-    ? pendingWorkers.map(worker => ({
-        apiVersion: 'triggers.harikube.info/v1',
-        kind: 'PiTrigger',
-        metadata: {
-          name: worker.triggerName,
+    ? pendingWorkers.map(worker =>
+        buildWorkerPiTriggerManifest({
+          triggerName: worker.triggerName,
           namespace: defaults.namespace,
           ownerReferences: triggerOwnerReferences,
-          labels: {
-            'harikube.info/session': resolvedSessionId,
-            'harikube.info/round': String(resolvedRound),
-            'harikube.info/worker': String(worker.index),
-            ...(defaults.traceId ? { [TRACE_LABEL]: defaults.traceId } : {})
-          },
-          annotations: {
-            'harikube.info/session-secret': resolvedSecretName,
-            'harikube.info/output-location': worker.outputLocation || ''
-          }
-        },
-        spec: {
-          resource: {
-            apiVersion: 'batch/v1',
-            kind: 'Job'
-          },
-          namespaces: [defaults.namespace],
-          labelSelectors: [`${PI_TRIGGER_JOB_NAME_LABEL}=${worker.triggerName}`],
-          eventTypes: ['ADDED', 'MODIFIED'],
-          eventFilter: TERMINAL_JOB_EVENT_FILTER,
-          sendInitialEvents: true,
-          maxJobs: 1,
+          sessionId: resolvedSessionId,
+          round: resolvedRound,
+          worker,
+          traceId: defaults.traceId,
           timeout: defaults.piTriggerTimeout,
           agent: defaults.agent
-        }
-      }))
+        })
+      )
     : [];
 
   return {
@@ -953,6 +915,7 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
           workers: Array.isArray(context.workers) ? context.workers : []
         });
 
+  // For timeout wake-ups we treat the job state as a timeout but still persist resumable metadata
   const jobState = promptInfo.timeout ? { outcome: 'timeout', summary: 'Worker timed out.' } : inspectJob(jobJson, eventsJson);
   if (jobState.outcome === 'not-ready') {
     return {
@@ -1078,14 +1041,19 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
   updatedContext.aggregate.completedWithFailures = agg.completed > 0 && agg.failed > 0;
   updatedContext.aggregate.completedWithTimeouts = agg.completed > 0 && agg.timedOut > 0;
 
-  updatedContext.status = pendingCount === 0 ? 'merging' : 'hibernated';
+  // Ensure timeout wake-ups persist resumable metadata and do not advance merge/next-step path
+  if (promptInfo.timeout) {
+    updatedContext.status = 'hibernated';
+  } else {
+    updatedContext.status = pendingCount === 0 ? 'merging' : 'hibernated';
+  }
   updatedContext.cleanup = cleanup;
   updatedSecret.data['context.json'] = encodeJson(updatedContext);
 
   // compute a top-level aggregate outcome when we're merging so callers can distinguish
   // an overall completed-with-failures/timeouts state from a single-worker failure
   const summaryCounts = { succeeded: agg.succeeded, failed: agg.failed, timeout: agg.timedOut };
-  if (pendingCount === 0) {
+  if (pendingCount === 0 && !promptInfo.timeout) {
     if (updatedContext.aggregate.completedWithFailures) {
       result.outcome = 'completed-with-failures';
     } else if (updatedContext.aggregate.completedWithTimeouts) {
@@ -1095,8 +1063,10 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     }
   }
 
+  const action = pendingCount === 0 && !promptInfo.timeout ? 'merge' : 'wait';
+
   return {
-    action: pendingCount === 0 ? 'merge' : 'wait',
+    action,
     promptInfo,
     context: updatedContext,
     cleanup,
@@ -1106,9 +1076,9 @@ export function processSessionWakeup({ prompt, secretJson, workerSummary = '', j
     replacementSecret: updatedSecret,
     replacementSecretJson: JSON.stringify(updatedSecret, null, 2),
     exitReason:
-      pendingCount === 0
+      action === 'merge'
         ? `Session ${promptInfo.sessionId} round ${promptInfo.round}: merging results from ${Array.isArray(context.workers) ? context.workers.length : 0} workers`
-        : `Session ${promptInfo.sessionId} round ${promptInfo.workerIndex} recorded, ${pendingCount} pending`
+        : `Session ${promptInfo.sessionId} round ${promptInfo.workerIndex} recorded, ${pendingCount} pending${promptInfo.timeout ? ' (timeout wake-up; session remains resumable)' : ''}`
   };
 }
 
