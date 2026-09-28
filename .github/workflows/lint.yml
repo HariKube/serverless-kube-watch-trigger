@@ -20,6 +20,9 @@ on:
     - "**.md"
     - "**.yaml"
     - "**.yml"
+    - "**.ts"
+    - "**.cjs"
+    - "**.mjs"
     - "Makefile"
 
 concurrency: 

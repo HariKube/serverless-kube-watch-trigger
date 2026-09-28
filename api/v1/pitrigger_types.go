@@ -32,11 +32,11 @@ type PiAgentSpec struct {
 	// The Secret must provide settings.json, models.json, models-store.json, and auth.json keys.
 	ConfigSecretRef corev1.LocalObjectReference `json:"configSecretRef"`
 
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	// PromptsConfigMapRef references the ConfigMap mounted into ~/.pi/agent/prompts.
 	PromptsConfigMapRef *corev1.LocalObjectReference `json:"promptsConfigMapRef"`
 
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	// SkillsConfigMapRef references the ConfigMap mounted into ~/.pi/agent/skills.
 	SkillsConfigMapRef *corev1.LocalObjectReference `json:"skillsConfigMapRef"`
 

@@ -15,6 +15,9 @@ on:
     branches: [main]
     paths-ignore:
     - "**.md"
+    - "**.ts"
+    - "**.cjs"
+    - "**.mjs"
 
 concurrency: 
   group: ${{ github.ref_name }}-test-integration
