@@ -395,8 +395,6 @@ spec:
                 required:
                 - configSecretRef
                 - image
-                - promptsConfigMapRef
-                - skillsConfigMapRef
                 type: object
               concurrency:
                 default: 1
