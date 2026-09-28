@@ -180,6 +180,27 @@ func TestAssemblePiWorkerJob_AllowsNilOptionalConfigMaps(t *testing.T) {
 	}
 }
 
+func TestAssemblePiWorkerJob_PreservesServiceAccountName(t *testing.T) {
+	trigger := &triggersv1.PiTrigger{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-assemble-sa", Namespace: "default"},
+		Spec: triggersv1.PiTriggerSpec{
+			Agent: triggersv1.PiAgentSpec{
+				ServiceAccountName: "pi-agent-worker",
+				ConfigSecretRef:    corev1.LocalObjectReference{Name: "agent-config"},
+				Image:              "docker.io/test/pi-agent:latest",
+			},
+		},
+	}
+
+	job := assemblePiWorkerJob(trigger, "job-sa", map[string]string{}, map[string]string{}, map[string]string{}, []string{"arg"}, []corev1.EnvVar{}, nil, nil)
+	if job == nil {
+		t.Fatalf("expected non-nil Job")
+	}
+	if job.Spec.Template.Spec.ServiceAccountName != "pi-agent-worker" {
+		t.Fatalf("expected serviceAccountName to be preserved, got %q", job.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
 func findEnvVar(container corev1.Container, name string) (string, bool) {
 	for _, env := range container.Env {
 		if env.Name == name {

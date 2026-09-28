@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: serverless-kube-watch-trigger
+    app.kubernetes.io/managed-by: kustomize
+  name: pi-agent-worker-discovery
+rules:
+- nonResourceURLs:
+  - /api
+  - /api/*
+  - /apis
+  - /apis/*
+  verbs:
+  - get

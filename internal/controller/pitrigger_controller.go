@@ -1148,10 +1148,14 @@ func buildPiWorkerLabelsAndAnnotations(trigger *triggersv1.PiTrigger, traceID, s
 // assemblePiWorkerJob constructs the Job object from pieces
 func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabels, podLabels, jobAnnotations map[string]string, workerArgs []string, env []corev1.EnvVar, activeDeadlineSeconds *int64, ttlSecondsAfterFinished *int32) *batchv1.Job {
 	// Build volumes and mounts: always include the required agent Secret, add optional ConfigMaps only when refs are provided
+	agentSecretName := ""
+	if trigger != nil {
+		agentSecretName = trigger.Spec.Agent.ConfigSecretRef.Name
+	}
 	volumes := []corev1.Volume{{
 		Name: piTriggerAgentSecretVolumeName,
 		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{SecretName: trigger.Spec.Agent.ConfigSecretRef.Name},
+			Secret: &corev1.SecretVolumeSource{SecretName: agentSecretName},
 		},
 	}}
 	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {

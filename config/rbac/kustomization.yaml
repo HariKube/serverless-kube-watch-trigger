@@ -19,6 +19,11 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
+- pi_agent_worker_service_account.yaml
+- pi_agent_worker_role.yaml
+- pi_agent_worker_role_binding.yaml
+- pi_agent_worker_discovery_cluster_role.yaml
+- pi_agent_worker_discovery_cluster_role_binding.yaml
 # The following RBAC configurations are used to protect
 # the metrics endpoint with authn/authz. These configurations
 # ensure that only authorized users and service accounts

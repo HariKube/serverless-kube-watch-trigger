@@ -408,7 +408,7 @@ data:
 ```
 
 Sample manifests are also available under `config/samples/`.
-For PiTrigger workers, apply `config/samples/pi-agent-worker-rbac.yaml` and use the built-in worker ServiceAccount name `pi-agent-worker`.
+The default install rendered from `config/default` now includes the PiTrigger worker ServiceAccount plus its Role, RoleBinding, ClusterRole, and ClusterRoleBinding. Because `config/default` applies a `namePrefix`, the rendered worker ServiceAccount name becomes `serverless-kube-watch-trigger-pi-agent-worker` by default. The standalone example at `config/samples/pi-agent-worker-rbac.yaml` is still available when you want to install the worker RBAC separately into another namespace and keep the unprefixed name `pi-agent-worker`.
 
 ### Ephemeral PiTrigger Sessions & Sleep/Wake Agent Orchestration
 
