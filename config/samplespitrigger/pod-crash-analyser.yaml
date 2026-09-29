@@ -1,0 +1,30 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: pod-crash-analyser
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: Pod
+  eventTypes:
+    - MODIFIED
+  labelSelectors:
+    - ai.harikube.io/diagnose=true
+  concurrency: 3
+  maxJobs: 5
+  lockDuration: 30s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    serviceAccountName: pi-agent-worker
+    timeout: 5m
+    prompt: |-
+      You are a Container Diagnostic agent.
+
+      Check the status of all containers in the triggering Pod:
+      1. If state is `ImagePullBackOff` or `ErrImagePull`, inspect image tag syntax, registry secret presence, and output a structured diagnostic annotation.
+      2. If state is `CrashLoopBackOff`, fetch the previous termination logs (`kubectl logs --previous`).
+      3. Summarize stack traces or fatal exit codes into `ai.harikube.io/crash-summary` annotation.
+      4. Set label `ai.harikube.io/diagnosed=true` and update `ai.harikube.io/status=done`.
