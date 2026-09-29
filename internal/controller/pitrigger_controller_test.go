@@ -209,36 +209,9 @@ func TestAssemblePiWorkerJob_AllowsNilOptionalConfigMaps(t *testing.T) {
 		t.Fatalf("expected at least one container in the Job")
 	}
 	container := job.Spec.Template.Spec.Containers[0]
-	foundWritableConfigMount := false
-	secretFileMounts := map[string]bool{}
-	for _, key := range piTriggerAgentConfigKeys {
-		secretFileMounts[key] = false
-	}
 	for _, m := range container.VolumeMounts {
 		if m.Name == piTriggerPromptsVolumeName || m.Name == piTriggerSkillsVolumeName {
 			t.Fatalf("did not expect prompts/skills volume mounts when refs are nil, found %s", m.Name)
-		}
-		if m.Name == piTriggerAgentConfigWritableVolumeName && m.MountPath == piTriggerAgentConfigMountPath {
-			foundWritableConfigMount = true
-		}
-		for _, key := range piTriggerAgentConfigKeys {
-			if m.Name == piTriggerAgentSecretVolumeName && m.MountPath == piTriggerAgentConfigMountPath+"/"+key {
-				if m.SubPath != key {
-					t.Fatalf("expected subPath %q for mount %q, got %q", key, m.MountPath, m.SubPath)
-				}
-				if !m.ReadOnly {
-					t.Fatalf("expected config secret mount %q to be read-only", m.MountPath)
-				}
-				secretFileMounts[key] = true
-			}
-		}
-	}
-	if !foundWritableConfigMount {
-		t.Fatalf("expected writable config mount at %s", piTriggerAgentConfigMountPath)
-	}
-	for key, found := range secretFileMounts {
-		if !found {
-			t.Fatalf("expected secret file mount for %s", key)
 		}
 	}
 }

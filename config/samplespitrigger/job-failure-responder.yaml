@@ -17,6 +17,9 @@ spec:
   sendInitialEvents: false
   timeout: 24h
   lockDuration: 45s
+  env:
+  - name: PI_OFFLINE
+    value: "true"
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:
