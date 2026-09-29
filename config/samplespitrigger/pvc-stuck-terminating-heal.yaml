@@ -1,0 +1,28 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: pvc-stuck-terminating-heal
+  namespace: default
+spec:
+  resource:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+  eventTypes:
+    - MODIFIED
+  concurrency: 2
+  maxJobs: 2
+  lockDuration: 60s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    serviceAccountName: pi-agent-worker
+    timeout: 10m
+    prompt: |-
+      You are a Storage Operations agent.
+
+      Inspect the triggering PersistentVolumeClaim. If `deletionTimestamp` is set and the PVC is stuck in `Terminating`:
+      1. Identify pods referencing this PVC or VolumeAttachments blocking unmount.
+      2. Check if the consumer pods are already terminated or unresponsive.
+      3. Safely force-release or annotate the PVC with diagnostic logs if human intervention on the underlying storage array is required.
+      4. Avoid forcibly stripping finalizers unless consumer pods are completely gone.
