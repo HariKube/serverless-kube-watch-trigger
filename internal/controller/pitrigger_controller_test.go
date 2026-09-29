@@ -944,7 +944,7 @@ var _ = Describe("PiTrigger Controller", func() {
 			Expect(container.Args).To(ContainElement(piTriggerServiceDiscoveryExtensionPath))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentConfigWritableVolumeName, MountPath: piTriggerAgentConfigMountPath}))
 			for _, key := range piTriggerAgentConfigKeys {
-				Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentSecretVolumeName, MountPath: piTriggerAgentConfigMountPath + "/" + key, SubPath: key, ReadOnly: true}))
+				Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerAgentSecretVolumeName, MountPath: piTriggerAgentConfigMountPath + "/" + key, SubPath: key, ReadOnly: false}))
 			}
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerPromptsVolumeName, MountPath: piTriggerAgentPromptsMountPath, ReadOnly: true}))
 			Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: piTriggerSkillsVolumeName, MountPath: piTriggerAgentSkillsMountPath, ReadOnly: true}))

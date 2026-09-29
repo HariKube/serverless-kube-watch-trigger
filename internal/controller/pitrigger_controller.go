@@ -1194,7 +1194,6 @@ func assemblePiWorkerJob(trigger *triggersv1.PiTrigger, jobName string, jobLabel
 			Name:      piTriggerAgentSecretVolumeName,
 			MountPath: piTriggerAgentConfigMountPath + "/" + key,
 			SubPath:   key,
-			ReadOnly:  true,
 		})
 	}
 	if trigger != nil && trigger.Spec.Agent.PromptsConfigMapRef != nil {

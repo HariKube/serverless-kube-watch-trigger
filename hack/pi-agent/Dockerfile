@@ -3,6 +3,7 @@ FROM node:24-bookworm-slim
 # Prevent npm update checks, audit/fund prompts, progress output and telemetry
 ENV NO_UPDATE_NOTIFIER=1
 ENV PI_SKIP_VERSION_CHECK=1
+ENV PI_OFFLINE=true
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV NPM_CONFIG_AUDIT=false
 ENV NPM_CONFIG_FUND=false
@@ -13,7 +14,7 @@ RUN apt-get update \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g npm@12.1.0
+RUN npm install -g --no-update-notifier --no-fund npm@12.1.0
 
 RUN npm install -g --no-update-notifier --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent billion-context
 
@@ -28,8 +29,5 @@ COPY skills/ /root/.pi/agent/skills/
 COPY extensions/ /root/.pi/agent/extensions/
 
 WORKDIR /workspace
-
-# Keep update checks permanently disabled at container runtime
-ENV PI_SKIP_VERSION_CHECK=1
 
 ENTRYPOINT ["bili", "pi"]

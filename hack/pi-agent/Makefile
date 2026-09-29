@@ -16,6 +16,7 @@ test:
 test-e2e:
 	@docker run --rm \
 		-e PI_OFFLINE=true \
+		-e PI_ENVIRONMENT=production \
 		-v $(HOME)/.pi/agent/auth.json:/root/.pi/agent/auth.json \
 		-v $(HOME)/.pi/agent/models-store.json:/root/.pi/agent/models-store.json \
 		-v $(HOME)/.pi/agent/settings.json:/root/.pi/agent/settings.json \
@@ -41,14 +42,13 @@ test-e2e-extension:
 			agent-memory.ts) PROMPT=$$'Report that memory backend prerequisites appear unavailable or summarize/store/query the current default namespace snapshot if possible; be explicit and non-destructive.';; \
 			*) PROMPT=$$'Inspect the live Kubernetes cluster (read-only) in namespace "default"; list Services (kubernetes), Endpoints (kubernetes), ConfigMaps (kube-root-ca.crt), recent node Events, and note that no user Pods or Jobs were returned in this snapshot; do not modify anything.';; \
 		esac; \
-		sleep 5
 		docker run --rm \
 			-e KUBECONFIG=$(KUBECONFIG) \
-			-e PI_OFFLINE=true \
 			-v $(HOME)/.pi/agent/auth.json:/root/.pi/agent/auth.json \
 			-v $(HOME)/.pi/agent/models-store.json:/root/.pi/agent/models-store.json \
 			-v $(HOME)/.pi/agent/settings.json:/root/.pi/agent/settings.json \
 			-v $(MAKEFILE_DIR)extensions:/root/.pi/agent/extensions:ro \
 			-v $(KUBECONFIG):$(KUBECONFIG):ro \
-			$(IMG) --no-extensions --extension /root/.pi/agent/extensions/$$ext -p "$$PROMPT - Rate execution and call `exit_pi` with parameters representing teh test status."; \
+			$(IMG) -p "$$PROMPT - Rate execution and call exit_pi with parameters representing the test status."; \
+		read -p "Press [Enter] to continue..."; \
 	done
