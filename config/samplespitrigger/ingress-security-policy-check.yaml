@@ -1,0 +1,28 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: ingress-security-policy-check
+  namespace: default
+spec:
+  resource:
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+  eventTypes:
+    - ADDED
+  concurrency: 2
+  maxJobs: 2
+  lockDuration: 30s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    serviceAccountName: pi-agent-worker
+    timeout: 5m
+    prompt: |-
+      You are a Network Security Auditor agent.
+
+      Evaluate the newly created Ingress:
+      1. Check if TLS is configured (`spec.tls`).
+      2. Verify if annotations enforce HTTPS redirection (`ingress.kubernetes.io/force-ssl-redirect`).
+      3. Verify whether an ingress NetworkPolicy exists in the namespace allowing traffic to the target backend pods.
+      4. Patch the Ingress with `ai.harikube.io/security-score=<pass|warn|fail>` and add actionable recommendations in annotations.
