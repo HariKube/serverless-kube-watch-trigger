@@ -9,14 +9,16 @@ RUN apt-get update \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
-  && chmod +x kubectl \
-  && mv kubectl /usr/local/bin/
+RUN npm install -g npm@12.1.0
 
 RUN npm install -g --no-update-notifier --ignore-scripts @earendil-works/pi-coding-agent billion-context
 
 RUN mkdir -p /root/.pi/agent \
   && npm install --no-update-notifier --ignore-scripts --no-package-lock --no-audit --no-fund --prefix /root/.pi/agent @kubernetes/client-node@2.0.0 typebox
+
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+  && chmod +x kubectl \
+  && mv kubectl /usr/local/bin/
 
 COPY skills/ /root/.pi/agent/skills/
 COPY extensions/ /root/.pi/agent/extensions/

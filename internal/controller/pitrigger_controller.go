@@ -1455,9 +1455,6 @@ func parsePiTriggerSessionIdentity(triggerName string) (string, string, string, 
 
 func buildPiTriggerWorkerArgs(prompt string, agent triggersv1.PiAgentSpec) []string {
 	args := []string{"--mode", "json"}
-	if agent.NoExtensions {
-		args = append(args, "--no-extensions")
-	}
 	for _, extension := range mergePiTriggerWorkerExtensions(agent.Extensions) {
 		args = append(args, "--extension", extension)
 	}

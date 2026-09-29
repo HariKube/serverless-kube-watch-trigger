@@ -43,6 +43,32 @@ func TestBuildPiTriggerWorkerArgsDoesNotDisableSessions(t *testing.T) {
 	}
 }
 
+func TestBuildPiTriggerWorkerArgsOmitsNoExtensionsFlag(t *testing.T) {
+	agent := triggersv1.PiAgentSpec{
+		NoExtensions: true,
+		Extensions:   []string{"npm:pi-graft"},
+		Provider:     "openai",
+		Model:        "gpt-4o-mini",
+	}
+	args := buildPiTriggerWorkerArgs("do the thing", agent)
+	if slices.Contains(args, "--no-extensions") {
+		t.Fatalf("expected PiTrigger worker args to not include --no-extensions, got %v", args)
+	}
+	// preserve normal arg-building behavior
+	if !slices.Contains(args, "--extension") {
+		t.Fatalf("expected PiTrigger worker args to include --extension entries, got %v", args)
+	}
+	if !slices.Contains(args, "--provider") || !slices.Contains(args, "openai") {
+		t.Fatalf("expected provider to be preserved in args, got %v", args)
+	}
+	if !slices.Contains(args, "--model") || !slices.Contains(args, "gpt-4o-mini") {
+		t.Fatalf("expected model to be preserved in args, got %v", args)
+	}
+	if !slices.Contains(args, "-p") {
+		t.Fatalf("expected prompt flag -p to be present, got %v", args)
+	}
+}
+
 func TestBuildRecoverablePiTriggerWorkerPromptIncludesWakeupAndPersistInstructions(t *testing.T) {
 	trigger := &triggersv1.PiTrigger{
 		ObjectMeta: metav1.ObjectMeta{

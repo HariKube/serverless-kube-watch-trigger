@@ -201,7 +201,7 @@ export default function (pi: any) {
           });
         };
 
-        const pythonPtyCmd = `import pty, os, sys; pty.spawn(['pi', '--mode', 'json', '--no-extensions', '--no-session', '--provider', sys.argv[2], '--model', sys.argv[3], '-p', sys.argv[1]])`;
+        const pythonPtyCmd = `import pty, os, sys; pty.spawn(['pi', '--mode', 'json', '--no-session', '--provider', sys.argv[2], '--model', sys.argv[3], '-p', sys.argv[1]])`;
 
         const child = spawn("python3", ["-c", pythonPtyCmd, formattedPrompt, provider, model], {
           cwd: targetCwd,

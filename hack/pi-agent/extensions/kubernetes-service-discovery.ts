@@ -1,10 +1,9 @@
 import fs from 'node:fs';
-import http from 'node:http';
-import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fsp } from 'node:fs';
-import { ApisApi, CoreApi, KubeConfig } from '@kubernetes/client-node';
+import { ApisApi, CoreApi, KubeConfig, ApiregistrationV1Api, ApiextensionsV1Api } from '@kubernetes/client-node';
+import { Type } from 'typebox';
 
 const RUNTIME_SKILL_NAME = 'kubernetes-service-discovery-runtime';
 const DEFAULT_NAMESPACE_PATH = process.env.NS_PATH || '/var/run/secrets/kubernetes.io/serviceaccount/namespace';
@@ -111,53 +110,6 @@ async function readNamespace() {
   }
 }
 
-async function requestJson(kc: KubeConfig, pathname: string) {
-  const cluster = kc.getCurrentCluster();
-  if (!cluster?.server) {
-    throw new Error('No active Kubernetes cluster is configured');
-  }
-
-  const url = new URL(pathname, cluster.server.endsWith('/') ? cluster.server : `${cluster.server}/`);
-  const isHttps = url.protocol === 'https:';
-  const options: https.RequestOptions = {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json'
-    }
-  };
-
-  if (isHttps) {
-    await kc.applyToHTTPSOptions(options);
-  }
-
-  const client = isHttps ? https : http;
-
-  return await new Promise<any>((resolve, reject) => {
-    const req = client.request(url, options, res => {
-      let raw = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => {
-        raw += chunk;
-      });
-      res.on('end', () => {
-        const statusCode = res.statusCode || 0;
-        if (statusCode < 200 || statusCode >= 300) {
-          reject(new Error(`GET ${pathname} failed with status ${statusCode}: ${raw.slice(0, 400)}`));
-          return;
-        }
-        try {
-          resolve(JSON.parse(raw));
-        } catch (error: any) {
-          reject(new Error(`GET ${pathname} returned invalid JSON: ${error.message}`));
-        }
-      });
-    });
-
-    req.on('error', reject);
-    req.end();
-  });
-}
-
 async function discoverServiceApis() {
   const kc = new KubeConfig();
   kc.loadFromDefault();
@@ -192,7 +144,22 @@ async function discoverServiceApis() {
 
   for (const groupVersion of preferredGroupVersions) {
     try {
-      const resourceList = await requestJson(kc, groupVersion.path);
+      // Use the native Kubernetes client discovery methods rather than raw HTTP requests.
+      // For the core API group ("v1") use the CoreApi; for other groups use ApisApi and query the specific groupVersion path.
+      let resourceList: any = null;
+      if (!groupVersion.group) {
+        // Core API resources: /api/v1
+        // CoreApi should expose a getAPIResources method for discovery.
+        const resp = await coreApi.getAPIResources();
+        resourceList = unwrapBody<any>(resp) || {};
+      } else {
+        // Named API groups: /apis/{group}/{version}
+        // ApisApi should expose a method to get resources for a specific groupVersion.
+        // Use the preferred groupVersion string (e.g. "networking.k8s.io/v1").
+        const resp = await apisApi.getAPIResources(groupVersion.group, groupVersion.version);
+        resourceList = unwrapBody<any>(resp) || {};
+      }
+
       const apiResources = Array.isArray(resourceList?.resources) ? resourceList.resources : [];
       for (const resource of apiResources) {
         if (!resource || typeof resource !== 'object') {
@@ -375,9 +342,85 @@ function writeSkill(rootDir: string, skillName: string, content: string) {
   return skillDir;
 }
 
+function unifyCandidatesFromSources(...sources: any[]) {
+  const all: any[] = [];
+  for (const src of sources) {
+    for (const r of src || []) {
+      all.push({
+        kind: r.kind,
+        groupVersion: r.groupVersion || r.group || '',
+        name: r.name,
+        source: r.source || 'discovery'
+      });
+    }
+  }
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+  for (const c of all) {
+    const key = `${c.kind}|${c.groupVersion}|${c.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(c);
+  }
+  return deduped;
+}
+
+function scoreCandidate(query: string, c: any) {
+  const q = String(query || '').toLowerCase();
+  const kind = String(c.kind || '').toLowerCase();
+  const name = String(c.name || '').toLowerCase();
+  const gv = String(c.groupVersion || '').toLowerCase();
+
+  if (!q) return 0;
+  let score = 0;
+  if (name === q) score += 1000;
+  if (kind === q) score += 500;
+  if (name.startsWith(q) || kind.startsWith(q) || gv.startsWith(q)) score += 100;
+  if (name.includes(q) || kind.includes(q) || gv.includes(q)) score += 10;
+  if (c.kind === 'Service') score += 5;
+  return score;
+}
+
+function unifiedLookup(query: string, { apiServices = [], crdResources = [], discovered = [] }: any = {}) {
+  const combined = unifyCandidatesFromSources(apiServices, crdResources, discovered);
+  const scored = combined.map((c: any) => ({ candidate: c, score: scoreCandidate(query, c) }));
+
+  scored.sort((a: any, b: any) => {
+    if (a.score !== b.score) return b.score - a.score;
+    const ka = String(a.candidate.kind || '');
+    const kb = String(b.candidate.kind || '');
+    const kcmp = ka.localeCompare(kb);
+    if (kcmp !== 0) return kcmp;
+    const gcmp = String(a.candidate.groupVersion || '').localeCompare(String(b.candidate.groupVersion || ''));
+    if (gcmp !== 0) return gcmp;
+    const ncmp = String(a.candidate.name || '').localeCompare(String(b.candidate.name || ''));
+    if (ncmp !== 0) return ncmp;
+    return String(a.candidate.source || '').localeCompare(String(b.candidate.source || ''));
+  });
+
+  return scored.slice(0, 20).map((s: any) => s.candidate);
+}
+
+async function tryList(api: any, methodNames: string[]) {
+  for (const name of methodNames) {
+    const fn = (api as any)[name];
+    if (typeof fn === 'function') {
+      try {
+        const resp = await fn.call(api);
+        const body = unwrapBody<any>(resp) || resp;
+        const items = Array.isArray(body?.items) ? body.items : Array.isArray(body) ? body : [];
+        return items;
+      } catch (e) {
+        // try next
+      }
+    }
+  }
+  return [];
+}
+
 export default function registerKubernetesServiceDiscovery(pi: any) {
   const skillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-kube-service-discovery-'));
-  const snapshotPromise = discoverServiceApis().catch((error: any) => ({
+  let snapshotPromise = discoverServiceApis().catch((error: any) => ({
     status: 'error',
     fetchedAt: new Date().toISOString(),
     message: error?.message || String(error)
@@ -396,6 +439,134 @@ export default function registerKubernetesServiceDiscovery(pi: any) {
     return {
       skillPaths: [await skillPathPromise]
     };
+  });
+
+  // Register a user-facing native lookup tool that merges service-like discovered API resources,
+  // APIService objects from apiregistration, and CRD-backed resources from apiextensions.
+  pi.registerTool({
+    name: 'kubernetes_service_lookup',
+    label: 'kubernetes_service_lookup',
+    description: 'Lookup cluster service-like APIs, APIService entries, and CRD-backed resources by a query string (merged, ranked, deterministic, max 20).',
+    parameters: Type.Object({
+      query: Type.String({ description: 'Search query' }),
+      limit: Type.Optional(Type.Number()),
+      refresh: Type.Optional(Type.Boolean()),
+      includeDetails: Type.Optional(Type.Boolean({ description: 'When true, attach source-specific native details to each candidate (apiService, crd, discovery).' }))
+    }),
+    async execute(_toolCallId: any, params: any) {
+      const query = String(params?.query || '').trim();
+      const limit = Math.min(Number(params?.limit || 20) || 20, 20);
+      const refresh = Boolean(params?.refresh);
+      const includeDetails = Boolean(params?.includeDetails || params?.details);
+
+      if (refresh) {
+        snapshotPromise = discoverServiceApis().catch((error: any) => ({ status: 'error', fetchedAt: new Date().toISOString(), message: error?.message || String(error) }));
+      }
+
+      const snapshot: any = await snapshotPromise;
+
+      // build discovered candidates from snapshot.resources
+      const discovered = (Array.isArray(snapshot?.resources) ? snapshot.resources : []).map((r: any) => ({
+        kind: r.kind,
+        groupVersion: r.groupVersion,
+        name: r.resource,
+        source: 'discovery'
+      }));
+
+      // use native kube client to list APIService and CRD objects
+      const kc = new KubeConfig();
+      kc.loadFromDefault();
+      const apiReg = kc.makeApiClient(ApiregistrationV1Api as any);
+      const apiExt = kc.makeApiClient(ApiextensionsV1Api as any);
+
+      let apiServices: any[] = [];
+      let crdResources: any[] = [];
+      let rawApiServiceItems: any[] = [];
+      let rawCrdItems: any[] = [];
+
+      try {
+        const items = await tryList(apiReg, ['listAPIService', 'listAPIServiceAsPromise', 'listAPIServices', 'listAPIServiceList']);
+        rawApiServiceItems = items || [];
+        apiServices = rawApiServiceItems.map((it: any) => ({
+          kind: it?.kind || 'APIService',
+          groupVersion: it?.apiVersion || 'apiregistration.k8s.io/v1',
+          name: it?.metadata?.name || it?.name || '',
+          source: 'apiService'
+        }));
+      } catch (e) {
+        apiServices = [];
+        rawApiServiceItems = [];
+      }
+
+      try {
+        const items = await tryList(apiExt, ['listCustomResourceDefinition', 'listCustomResourceDefinitions', 'listCustomResourceDefinitionAsPromise']);
+        rawCrdItems = items || [];
+        crdResources = (rawCrdItems)
+          .map((c: any) => {
+            const versions = Array.isArray(c?.spec?.versions) ? c.spec.versions : [];
+            const v = versions.find((vv: any) => vv?.served) || versions[0] || { name: '' };
+            const gv = c?.spec && v?.name ? `${c.spec.group}/${v.name}` : c?.apiVersion || '';
+            return {
+              kind: c?.spec?.names?.kind || 'CustomResource',
+              groupVersion: gv,
+              name: c?.spec?.names?.plural || c?.metadata?.name || '',
+              source: 'crd'
+            };
+          })
+          .filter((x: any) => x.name);
+      } catch (e) {
+        crdResources = [];
+        rawCrdItems = [];
+      }
+
+      const results = unifiedLookup(query, { apiServices, crdResources, discovered }).slice(0, limit);
+
+      if (includeDetails) {
+        const snapshotResources = Array.isArray(snapshot?.resources) ? snapshot.resources : [];
+        const enriched = results.map((c: any) => {
+          const base = { kind: c.kind, groupVersion: c.groupVersion, name: c.name, source: c.source };
+          try {
+            if (c.source === 'apiService') {
+              const match = rawApiServiceItems.find((it: any) => String(it?.metadata?.name || it?.name || '') === String(c.name));
+              const backing = match?.spec?.service ? { name: match.spec.service.name, namespace: match.spec.service.namespace } : undefined;
+              const conditions = Array.isArray(match?.status?.conditions) ? match.status.conditions : [];
+              const available = conditions.some((cond: any) => String(cond.type || '').toLowerCase() === 'available' && String(cond.status || '').toLowerCase() === 'true');
+              return { ...base, nativeDetails: { apiService: { backingService: backing, available, conditions } } };
+            }
+            if (c.source === 'crd') {
+              const match = rawCrdItems.find((it: any) => {
+                const plural = it?.spec?.names?.plural || it?.metadata?.name || '';
+                return String(plural) === String(c.name) || String(it?.metadata?.name) === String(c.name);
+              });
+              const group = match?.spec?.group || undefined;
+              const versions = Array.isArray(match?.spec?.versions) ? match.spec.versions.map((v: any) => ({ name: v.name, served: v.served, storage: v.storage })) : [];
+              const names = match?.spec?.names || undefined;
+              const scope = match?.spec?.scope || undefined;
+              return { ...base, nativeDetails: { crd: { group, versions, names, scope } } };
+            }
+            // discovery
+            const match = snapshotResources.find((r: any) => String(r?.resource) === String(c.name) && String(r?.groupVersion) === String(c.groupVersion));
+            if (match) {
+              const { resource, verbs, namespaced, categories, shortNames, singularName } = match;
+              return { ...base, nativeDetails: { discovery: { resource, verbs, namespaced, categories, shortNames, singularName } } };
+            }
+          } catch (e) {
+            // swallow enrichment errors and return base
+          }
+          return base;
+        });
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify(enriched, null, 2) }],
+          details: { status: 'ok', count: enriched.length, results: enriched }
+        };
+      }
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(results, null, 2) }],
+        details: { status: 'ok', count: results.length, results }
+      };
+    }
   });
 
   pi.on('session_shutdown', async () => {

@@ -28,6 +28,7 @@ rules:
   - create
   - update
   - patch
+  - delete
 - apiGroups:
   - batch
   resources:
@@ -62,3 +63,21 @@ rules:
   - create
   - update
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
