@@ -1,0 +1,28 @@
+apiVersion: triggers.harikube.info/v1
+kind: PiTrigger
+metadata:
+  name: cert-manager-failure-triage
+  namespace: cert-manager
+spec:
+  resource:
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+  eventTypes:
+    - MODIFIED
+  concurrency: 1
+  maxJobs: 1
+  lockDuration: 30s
+  agent:
+    image: docker.io/mhmxs/pi-agent-empty:latest
+    configSecretRef:
+      name: pi-agent-config
+    serviceAccountName: pi-agent-worker
+    timeout: 5m
+    prompt: |-
+      You are a Security & PKI Operations agent.
+
+      Check if the triggering Certificate status is `Ready=False`:
+      1. Inspect associated `CertificateRequest`, `Order`, and `Challenge` resources.
+      2. Analyze HTTP-01 or DNS-01 validation failure reasons (e.g., DNS propagation timeout, ingress misconfiguration).
+      3. Annotate the Certificate with a clear root-cause diagnosis (`ai.harikube.io/cert-issue-reason`).
+      4. If the failure is due to a temporary ingress routing mismatch, patch the Ingress annotations to restore challenge routing.
