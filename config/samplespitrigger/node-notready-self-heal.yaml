@@ -14,9 +14,6 @@ spec:
   sendInitialEvents: false
   timeout: 24h
   lockDuration: 45s
-  env:
-  - name: PI_OFFLINE
-    value: "false"
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:
@@ -33,6 +30,9 @@ spec:
     extensions:
       - npm:pi-graft
     timeout: 15m
+    env:
+    - name: PI_OFFLINE
+      value: "false"
     prompt: |-
       You are a Kubernetes node self-healing agent.
 
