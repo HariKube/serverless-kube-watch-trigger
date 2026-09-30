@@ -4,9 +4,11 @@ import * as fs from "fs";
 import * as os from "os";
 import * as crypto from "crypto";
 import * as headlessOutput from "./headless_output.cjs";
+import registerExtensionRuntime from "./extension-runtime.mjs";
 
 export default function (pi: any) {
-  pi.registerTool({
+  // Preserve the original headless tool metadata and behavior but route lifecycle through the shared runtime helper
+  const toolMeta = {
     name: "headless",
     description: "Executes a task in a headless sub-process using pi with TTY allocation.",
     parameters: {
@@ -337,5 +339,35 @@ export default function (pi: any) {
         });
       });
     }
-  });
+  };
+
+  // Lightweight discovery snapshot for runtime skills (local/runtime-oriented)
+  const discoverFn = async () => {
+    try {
+      return {
+        status: "ok",
+        fetchedAt: new Date().toISOString(),
+        runtime: {
+          platform: process.platform,
+          nodeVersion: process.version,
+          cwd: process.cwd()
+        },
+        tools: [{ name: toolMeta.name, description: toolMeta.description }]
+      };
+    } catch (err: any) {
+      return {
+        status: "error",
+        fetchedAt: new Date().toISOString(),
+        message: err?.message || String(err)
+      };
+    }
+  };
+
+  const renderSkillFn = (snapshot: any) => {
+    return `Headless Runtime Snapshot\n\nTool: ${toolMeta.name}\nDescription: ${toolMeta.description}\nFetchedAt: ${snapshot?.fetchedAt}\nRuntime: ${JSON.stringify(snapshot?.runtime || {}, null, 2)}\n`;
+  };
+
+  // Route registration and resources_discover lifecycle through the shared helper
+  // Note: we intentionally do not await the async helper so the export remains synchronous in shape
+  registerExtensionRuntime(pi, toolMeta, discoverFn, renderSkillFn);
 }

@@ -16,11 +16,11 @@ test:
 test-e2e:
 	@docker run --rm \
 		-e PI_OFFLINE=true \
-		-e PI_ENVIRONMENT=production \
+		-e BILI_CMD= \
 		-v $(HOME)/.pi/agent/auth.json:/root/.pi/agent/auth.json \
 		-v $(HOME)/.pi/agent/models-store.json:/root/.pi/agent/models-store.json \
 		-v $(HOME)/.pi/agent/settings.json:/root/.pi/agent/settings.json \
-		$(IMG) -p "hi"
+		$(IMG) -p "what are the available agent tools, extensiond, and skills"
 
 test-e2e-extension:
 	@test -n "$(KUBECONFIG)" || (echo "KUBECONFIG must be set and point to a kubeconfig file"; exit 1)
@@ -49,6 +49,6 @@ test-e2e-extension:
 			-v $(HOME)/.pi/agent/settings.json:/root/.pi/agent/settings.json \
 			-v $(MAKEFILE_DIR)extensions:/root/.pi/agent/extensions:ro \
 			-v $(KUBECONFIG):$(KUBECONFIG):ro \
-			$(IMG) -p "$$PROMPT - Rate execution and call exit_pi with parameters representing the test status."; \
+			$(IMG) -p "$$PROMPT - Rate execution and call exit_pi with parameters representing the test status."; \\
 		read -p "Press [Enter] to continue..."; \
 	done

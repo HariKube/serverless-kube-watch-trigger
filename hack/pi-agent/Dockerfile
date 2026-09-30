@@ -1,9 +1,12 @@
 FROM node:24-bookworm-slim
 
+ARG BILI_CMD?=time
+
 # Prevent npm update checks, audit/fund prompts, progress output and telemetry
 ENV NO_UPDATE_NOTIFIER=1
 ENV PI_SKIP_VERSION_CHECK=1
 ENV PI_OFFLINE=true
+ENV BILI_CMD=${BILI_CMD}
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 ENV NPM_CONFIG_AUDIT=false
 ENV NPM_CONFIG_FUND=false
@@ -25,9 +28,8 @@ RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/s
   && chmod +x kubectl \
   && mv kubectl /usr/local/bin/
 
-COPY skills/ /root/.pi/agent/skills/
 COPY extensions/ /root/.pi/agent/extensions/
 
 WORKDIR /workspace
 
-ENTRYPOINT ["bili", "pi"]
+ENTRYPOINT ["sh", "-c", "exec ${BILI_CMD} pi \"$@\"", "--"]

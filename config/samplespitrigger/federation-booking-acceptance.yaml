@@ -20,6 +20,9 @@ spec:
   sendInitialEvents: false
   timeout: 24h
   lockDuration: 24h5s
+  env:
+  - name: BILI_CMD
+    value: ""
   agent:
     image: ghcr.io/your-org/pi-agent-hack-extensions:latest # Build from hack/pi-agent/Dockerfile and publish for your cluster.
     configSecretRef:

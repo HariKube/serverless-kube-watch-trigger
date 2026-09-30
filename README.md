@@ -302,7 +302,6 @@ spec:
   watcherKubeconfigSecret:
     name: external-cluster-kubeconfig
   timeout: 24h # Optional, limits the watcher/session lifetime for this PiTrigger (enforced from trigger creation timestamp; not reset on reconcile)
-
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:
@@ -315,9 +314,6 @@ spec:
     model: gpt-4o-mini
     prompt: "Review the triggering Kubernetes event and summarize the most important changes."
     workingDir: /workspace
-    noExtensions: true
-    extensions:
-      - npm:pi-graft
     timeout: 10m
     serviceAccountName: pi-agent-worker
     imagePullPolicy: IfNotPresent

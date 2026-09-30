@@ -19,7 +19,7 @@ spec:
   lockDuration: 45s
   env:
   - name: PI_OFFLINE
-    value: "true"
+    value: "false"
   agent:
     image: docker.io/mhmxs/pi-agent-empty:latest
     configSecretRef:
