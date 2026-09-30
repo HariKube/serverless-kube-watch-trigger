@@ -70,6 +70,10 @@ func (cmw *ConfigMapWatcher) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-deadmanTimer.C:
+			// If the deadman timer fires with no API events, proactively release this pod's
+			// heartbeat and partition claims so other replicas can recover ownership quickly,
+			// then preserve the original fail-closed behavior by terminating via panic.
+			cmw.WipeConfigMap(context.Background())
 			panic("configmap watcher received no API events before the deadman timeout elapsed")
 		default:
 		}
