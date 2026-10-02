@@ -248,7 +248,7 @@ var _ = Describe("trigger helper utilities", func() {
 			Expect(event).To(ContainSubstring("status code is 500"))
 		})
 
-		It("records a detailed warning event after patching trigger status", func() {
+		It("does not report benign closed-channel errors as watcher failures when session is active", func() {
 			recorder := record.NewFakeRecorder(1)
 			runningTriggersLock := sync.Mutex{}
 			runningTriggers := map[string]func(){
@@ -296,27 +296,23 @@ var _ = Describe("trigger helper utilities", func() {
 				},
 			)
 
-			Eventually(func() string {
+			// closed channel is considered benign -> do not report (no patch, no Warning event)
+			Consistently(func() string {
 				patchesMu.Lock()
 				defer patchesMu.Unlock()
 
 				return patchedErrorReason
-			}, 5*time.Second, 100*time.Millisecond).Should(Equal("closed channel"))
+			}, 250*time.Millisecond).Should(Equal(""))
+
 			patchesMu.Lock()
 			defer patchesMu.Unlock()
-			Expect(patchedErrorTime.IsZero()).To(BeFalse())
-			Expect(patchedErrorResourceVersion).To(Equal("42"))
+			Expect(patchedErrorTime.IsZero()).To(BeTrue())
+			Expect(patchedErrorResourceVersion).To(Equal(""))
 			Expect(cancelCalled).To(BeTrue())
 			Expect(stopCalled).To(BeTrue())
 			Expect(runningTriggers).NotTo(HaveKey("default/httptrigger-event"))
 
-			var event string
-			Eventually(recorder.Events, 5*time.Second, 100*time.Millisecond).Should(Receive(&event))
-			Expect(event).To(ContainSubstring("Warning"))
-			Expect(event).To(ContainSubstring("WatcherClosed"))
-			Expect(event).To(ContainSubstring("default/httptrigger-event"))
-			Expect(event).To(ContainSubstring("closed channel"))
-			Expect(event).To(ContainSubstring("resourceVersion=42"))
+			Consistently(recorder.Events, 250*time.Millisecond).ShouldNot(Receive())
 		})
 
 		It("does not patch status or tear down state for a superseded session", func() {

@@ -36,6 +36,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	unstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
@@ -1469,6 +1470,36 @@ var _ = Describe("HTTPTrigger Controller - additional coverage", func() {
 			r.runningTriggersLock.Lock()
 			Expect(r.runningTriggers).NotTo(BeEmpty())
 			r.runningTriggersLock.Unlock()
+		})
+	})
+
+	// ─────────────────────────────────────────────────────────────
+	// Bookmark compatibility (unit-test only)
+	// ─────────────────────────────────────────────────────────────
+	Context("Bookmark compatibility", func() {
+		It("accepts bookmark events backed by non-PartialObjectMetadata (compat)", func() {
+			// Simulate a bookmark event whose object is an unstructured.Unstructured
+			unstr := &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"resourceVersion": "rv-unstructured",
+					},
+				},
+			}
+
+			// PartialObjectMetadata also supported
+			pom := &metav1.PartialObjectMetadata{}
+			pom.SetResourceVersion("rv-pom")
+
+			// The helper extractBookmarkResourceVersion
+			// should accept both types and return the resourceVersion successfully.
+			rv, ok := extractBookmarkResourceVersion(unstr)
+			Expect(ok).To(BeTrue())
+			Expect(rv).To(Equal("rv-unstructured"))
+
+			rv2, ok := extractBookmarkResourceVersion(pom)
+			Expect(ok).To(BeTrue())
+			Expect(rv2).To(Equal("rv-pom"))
 		})
 	})
 

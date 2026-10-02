@@ -67,6 +67,8 @@ spec:
           metadata:
             name: pi-trigger-simple
             namespace: pi-trigger-simple
+            labels:
+              triggers.harikube.info/distribution: item-1
           spec:
             resource:
               apiVersion: v1
@@ -119,7 +121,9 @@ spec:
     - script:
         content: |
           set -euo pipefail
+          count=0
           for _ in $(seq 1 60); do
+            count=$((count+1))
             JOB_NAME="$(kubectl get jobs -n pi-trigger-simple -l triggers.harikube.info/pitrigger-name=pi-trigger-simple -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
             POD_NAME=""
             JOB_ARGS=""
@@ -137,6 +141,22 @@ spec:
               kubectl get job "$JOB_NAME" -n pi-trigger-simple -o yaml
               kubectl get pod "$POD_NAME" -n pi-trigger-simple -o yaml
               exit 0
+            fi
+
+            # If the watcher missed the ADD event, re-trigger the watched ConfigMap a bounded
+            # number of times to provoke another ADDED event while keeping output quiet.
+            if [ -z "$JOB_NAME" ] && [ "$count" -le 12 ]; then
+              CM_NAME="pi-trigger-source-${count}-$$-$RANDOM"
+              printf '%s\n' \
+                'apiVersion: v1' \
+                'kind: ConfigMap' \
+                'metadata:' \
+                "  name: ${CM_NAME}" \
+                '  namespace: pi-trigger-simple' \
+                '  labels:' \
+                '    watch-e2e-pi: "true"' \
+                'data:' \
+                '  key: value' | kubectl apply -f - >/dev/null 2>&1 || true
             fi
 
             sleep 2

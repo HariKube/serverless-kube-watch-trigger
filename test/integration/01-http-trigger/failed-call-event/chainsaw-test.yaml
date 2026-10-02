@@ -104,6 +104,8 @@ spec:
           metadata:
             name: failing-httptrigger-example
             namespace: http-trigger-failure
+            labels:
+              triggers.harikube.info/distribution: item-1
           spec:
             resource:
               apiVersion: v1
@@ -162,7 +164,8 @@ spec:
             fi
             # Re-trigger the watched ConfigMap by deleting and recreating it so the controller receives an ADDED event
             kubectl delete configmap/failing-http-source -n http-trigger-failure --ignore-not-found >/dev/null 2>&1 || true
-            kubectl create configmap failing-http-source --from-literal=key=value --labels=watch-e2e-http-fail=true -n http-trigger-failure --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
+            kubectl delete configmap/failing-http-source -n http-trigger-failure --ignore-not-found >/dev/null 2>&1 || true
+            printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: failing-http-source' '  namespace: http-trigger-failure' '  labels:' '    watch-e2e-http-fail: "true"' 'data:' '  key: value' | kubectl apply -f - >/dev/null 2>&1 || true
             sleep 2
           done
           echo "expected failure status or event not found"

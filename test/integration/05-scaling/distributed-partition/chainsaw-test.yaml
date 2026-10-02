@@ -42,67 +42,6 @@ spec:
           - kind: ServiceAccount
             name: serverless-kube-watch-trigger-controller-manager
             namespace: serverless-kube-watch-trigger-system
-    - script:
-        content: |
-          set -euo pipefail
-
-          policy_version=""
-          for version in v1 v1beta1 v1alpha1; do
-            if kubectl explain --api-version="admissionregistration.k8s.io/${version}" \
-              mutatingadmissionpolicy >/dev/null 2>&1; then
-              policy_version="$version"
-              break
-            fi
-          done
-
-          if [ -z "$policy_version" ]; then
-            echo "MutatingAdmissionPolicy API is not available in this cluster"
-            kubectl api-versions | grep admissionregistration.k8s.io || true
-            exit 1
-          fi
-
-          cat <<EOF | kubectl apply -f -
-          apiVersion: admissionregistration.k8s.io/${policy_version}
-          kind: MutatingAdmissionPolicy
-          metadata:
-            name: scaling-configmap-labeler
-          spec:
-            failurePolicy: Fail
-            reinvocationPolicy: Never
-            matchConstraints:
-              resourceRules:
-              - apiGroups:
-                - ""
-                apiVersions:
-                - v1
-                operations:
-                - CREATE
-                - UPDATE
-                resources:
-                - configmaps
-            mutations:
-            - patchType: ApplyConfiguration
-              applyConfiguration:
-                expression: |
-                  Object{
-                    metadata: Object.metadata{
-                      labels: {
-                        "triggers.harikube.info/distribution":
-                          "item-" + string(
-                            1 + ((size(object.metadata.namespace) + size(object.metadata.name)) % 100)
-                          )
-                      }
-                    }
-                  }
-          ---
-          apiVersion: admissionregistration.k8s.io/${policy_version}
-          kind: MutatingAdmissionPolicyBinding
-          metadata:
-            name: scaling-configmap-labeler
-          spec:
-            policyName: scaling-configmap-labeler
-            matchResources: {}
-          EOF
   - name: Switch operator to distributed mode and scale replicas
     try:
     - script:
@@ -156,12 +95,10 @@ spec:
           kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 \
             deployment/serverless-kube-watch-trigger-controller-manager \
             -n serverless-kube-watch-trigger-system --timeout=300s
-    # This step switches the operator into a three-replica, leader-election-free
-    # shape and (via the step above) binds it to the distributed partition. Both
-    # have to be undone even when a later step fails: a leftover
-    # distributed-rolebinding makes the operator ignore triggers that carry no
-    # distribution label, and leftover replicas make every later suite run
-    # against an image and topology it did not ask for.
+    # This step pre-scales the operator to three replicas as a test prerequisite.
+    # The replica count must be restored even when a later step fails: leftover
+    # replicas make every later suite run against an image and topology it did not ask for.
+    # The distributed rolebinding cleanup is performed below as well.
     finally:
     - script:
         content: |
@@ -171,7 +108,7 @@ spec:
           kubectl delete clusterrole \
             serverless-kube-watch-trigger-distributed-role --ignore-not-found
           kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
-            -n serverless-kube-watch-trigger-system --type=strategic \
+            -n serverless-kube-watch-trigger-system --type:strategic \
             -p '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"manager","args":["--leader-elect","--health-probe-bind-address=:8081"]}]}}}}'
           kubectl rollout status deployment/serverless-kube-watch-trigger-controller-manager \
             -n serverless-kube-watch-trigger-system --timeout=300s
@@ -241,6 +178,7 @@ spec:
             namespace: scaling
             labels:
               triggers.harikube.info/distribution: item-1
+
           spec:
             resource:
               apiVersion: v1
@@ -271,7 +209,9 @@ spec:
           for _ in $(seq 1 90); do
             phase=$(kubectl get httptrigger scaling-httptrigger -n scaling \
               -o jsonpath='{.status.phase}' 2>/dev/null || true)
-            if [ "$phase" = "Running" ]; then
+            dist=$(kubectl get httptrigger scaling-httptrigger -n scaling \
+              -o go-template='{{ index .metadata.labels "triggers.harikube.info/distribution" }}' 2>/dev/null || true)
+            if [ "$phase" = "Running" ] && [ -n "$dist" ] && printf '%s' "$dist" | grep -q '^item-'; then
               exit 0
             fi
             sleep 2
@@ -321,9 +261,6 @@ spec:
                 -l control-plane=controller-manager --tail=200 || true
               exit 1
             fi
-            distribution_label=$(kubectl get configmap "$name" -n scaling \
-              -o go-template='{{ index .metadata.labels "triggers.harikube.info/distribution" }}')
-            printf '%s\n' "$distribution_label" | grep -q '^item-'
           done
   - name: Wipe partition state, immediately create the second batch, and ensure all reconcile
     try:
@@ -386,9 +323,6 @@ spec:
                 -l control-plane=controller-manager --tail=200 || true
               exit 1
             fi
-            distribution_label=$(kubectl get configmap "$name" -n scaling \
-              -o go-template='{{ index .metadata.labels "triggers.harikube.info/distribution" }}')
-            printf '%s\n' "$distribution_label" | grep -q '^item-'
           done
   - name: Cleanup test resources
     try:
@@ -400,8 +334,6 @@ spec:
     - script:
         content: |
           set -euo pipefail
-          kubectl delete mutatingadmissionpolicybinding scaling-configmap-labeler --ignore-not-found=true
-          kubectl delete mutatingadmissionpolicy scaling-configmap-labeler --ignore-not-found=true
           kubectl delete clusterrolebinding serverless-kube-watch-trigger-distributed-rolebinding \
             --ignore-not-found=true
           kubectl delete clusterrole serverless-kube-watch-trigger-distributed-role \

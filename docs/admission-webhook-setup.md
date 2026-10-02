@@ -18,12 +18,13 @@ When `--enable-leader-election=false`, operator replicas divide responsibility b
 The following example computes a stable partition from the trigger namespace and name and writes the label during create and update requests.
 
 ```yaml
-apiVersion: admissionregistration.k8s.io/v1alpha1
+apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicy
 metadata:
   name: trigger-distribution-labeler
 spec:
   failurePolicy: Fail
+  reinvocationPolicy: Never
   matchConstraints:
     resourceRules:
       - apiGroups: ["triggers.harikube.info"]
@@ -31,29 +32,25 @@ spec:
         operations: ["CREATE", "UPDATE"]
         resources: ["httptriggers", "pitriggers"]
   mutations:
-    - patchType: ApplyConfiguration
-      applyConfiguration:
-        expression: |
-          Object{
-            metadata: Object.metadata{
-              labels: Object.metadata.labels.orValue({}).merge({
-                "triggers.harikube.info/distribution":
-                  "item-" + string(
-                    1 + (
-                      int(crc32(string(object.metadata.namespace + "/" + object.metadata.name))) % 100
-                    )
-                  )
-              })
-            }
-          }
+  - patchType: ApplyConfiguration
+    applyConfiguration:
+      expression: >
+        Object{metadata: Object.metadata{labels: {
+          "triggers.harikube.info/distribution": "item-" + string(1 + ((size(object.metadata.namespace) + size(object.metadata.name)) % 100))
+        }}}
 ---
-apiVersion: admissionregistration.k8s.io/v1alpha1
+apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingAdmissionPolicyBinding
 metadata:
   name: trigger-distribution-labeler
 spec:
   policyName: trigger-distribution-labeler
-  matchResources: {}
+  matchResources:
+    resourceRules:
+      - apiGroups: ["triggers.harikube.info"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httptriggers", "pitriggers"]
 ```
 
 If your cluster does not expose `crc32()` in CEL, replace the expression with your platform's preferred deterministic hash or fall back to the webhook approach below.

@@ -15,7 +15,7 @@ Please follow the guide in the [release](https://github.com/HariKube/serverless-
 
 Additional operator documentation lives under [`docs/`](docs/):
 
-- [`docs/admission-webhook-setup.md`](docs/admission-webhook-setup.md) — reference setup for assigning stable `triggers.harikube.info/distribution` labels to `HTTPTrigger` and `PiTrigger` resources, including CEL `MutatingAdmissionPolicy` and `MutatingWebhookConfiguration` examples for distributed partition mode.
+- [`docs/admission-webhook-setup.md`](docs/admission-webhook-setup.md) — reference setup for assigning stable `triggers.harikube.info/distribution` labels to `HTTPTrigger` and `PiTrigger` resources, including CEL `MutatingAdmissionPolicy` and `MutatingWebhookConfiguration` examples for distributed partition mode. It is on by default.
 
 ### Multi-replica annotation lock
 

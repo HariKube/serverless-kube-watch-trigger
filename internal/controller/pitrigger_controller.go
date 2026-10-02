@@ -349,11 +349,41 @@ func (r *PiTriggerReconciler) preflightReconcile(ctx context.Context, logger log
 		sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
 		return true, nil
 	}
-	if r.PartitionController != nil && !r.PartitionController.OwnsObject(trigger) {
+
+	// If the trigger is not yet being deleted but its session timeout has already elapsed,
+	// prefer executing the session-timeout cleanup path so restore-after-downtime cases
+	// still run their TIMED_OUT cleanup even when partition ownership would otherwise
+	// drop this reconcile. This mirrors the cleanup behavior in createTrigger/handleSessionTimeout.
+	sessionTimeout := trigger.Spec.Timeout.Duration
+	if sessionTimeout > 0 && time.Now().UTC().After(trigger.CreationTimestamp.Add(sessionTimeout)) && (trigger.GetDeletionTimestamp() == nil || trigger.GetDeletionTimestamp().IsZero()) {
+		logger.Info("Trigger already timed out before reconcile; dispatching session-timeout job and requesting deletion")
+		if err := r.dispatchTriggerSessionTimeoutJob(ctx, triggerRefName, trigger); err != nil {
+			logger.Error(err, "Trigger session-timeout job dispatch failed")
+		}
+		deleteCtx, deleteCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer deleteCancel()
+		if err := r.Delete(deleteCtx, trigger); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Timed out trigger deletion failed")
+		}
 		r.stopRunningTrigger(triggerRefName)
 		r.remove(triggerRefName)
 		sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
 		return true, nil
+	}
+
+	if r.PartitionController != nil {
+		// Allow unlabeled triggers to proceed so their live session-timeout path can start;
+		// only reject triggers that carry the distribution label and are not owned by this replica.
+		if labels := trigger.GetLabels(); labels != nil {
+			if dist := labels[partition.DistributionLabelKey]; dist != "" {
+				if !r.PartitionController.OwnsObject(trigger) {
+					r.stopRunningTrigger(triggerRefName)
+					r.remove(triggerRefName)
+					sharedPiTriggerJobCounterRegistry.remove(triggerRefName)
+					return true, nil
+				}
+			}
+		}
 	}
 	if trigger.Status.Phase == triggersv1.TriggerPhaseRunning {
 		if err := r.clearExpiredAnnotationLease(ctx, logger, trigger); err != nil {

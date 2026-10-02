@@ -76,6 +76,8 @@ spec:
           metadata:
             name: modified-event-trigger
             namespace: modified-event
+            labels:
+              triggers.harikube.info/distribution: item-1
           spec:
             resource:
               apiVersion: v1

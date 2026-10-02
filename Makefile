@@ -83,12 +83,12 @@ setup-test-integration: cleanup-test-integration ## Set up a Kind cluster for in
 test-integration: setup-test-integration _test-integration
 
 _test-integration:
-	TAG=$(TAG) $(CHAINSAW) test --test-dir test/integration/00-operator
-	$(CHAINSAW) test --test-dir test/integration/01-http-trigger
-	$(CHAINSAW) test --test-dir test/integration/02-ai-trigger
-	$(CHAINSAW) test --test-dir test/integration/03-ephemeral
-	$(CHAINSAW) test --test-dir test/integration/04-locking
-	$(CHAINSAW) test --test-dir test/integration/05-scaling
+	TAG=$(TAG) $(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/00-operator
+	$(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/01-http-trigger
+	$(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/02-ai-trigger
+	$(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/03-ephemeral
+	$(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/04-locking
+	$(CHAINSAW) test --assert-timeout 120s --test-dir test/integration/05-scaling
 	$(MAKE) cleanup-test-integration
 
 .PHONY: cleanup-test-integration

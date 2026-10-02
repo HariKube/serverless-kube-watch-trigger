@@ -56,6 +56,8 @@ spec:
           metadata:
             name: pi-trigger-secondary
             namespace: pi-trigger-secondary
+            labels:
+              triggers.harikube.info/distribution: item-1
           spec:
             timeout: 10m # trigger/session timeout
             resource:
@@ -105,7 +107,19 @@ spec:
     - script:
         content: |
           set -euo pipefail
-          for _ in $(seq 1 60); do
+          for i in $(seq 1 60); do
+            # Create a fresh, uniquely named ConfigMap each retry to ensure an ADDED event is observed
+            CM_NAME="pi-trigger-secondary-source-${i}-$$-$RANDOM"
+            printf '%s\n' "apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: ${CM_NAME}
+            namespace: pi-trigger-secondary
+            labels:
+              watch-e2e-pi-secondary: \"true\"
+          data:
+            key: value" | kubectl apply -f - >/dev/null 2>&1 || true
+
             JOB_NAME="$(kubectl get jobs -n pi-trigger-secondary -l triggers.harikube.info/pitrigger-name=pi-trigger-secondary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
             POD_NAME=""
             JOB_ARGS=""

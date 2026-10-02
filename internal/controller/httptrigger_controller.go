@@ -36,6 +36,7 @@ import (
 	"github.com/facette/natsort"
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -877,15 +878,14 @@ func (r *HTTPTriggerReconciler) createTrigger(reconcileCtx context.Context, reco
 				}
 
 				if event.Type == watch.Bookmark {
-					bookmark, ok := event.Object.(*metav1.PartialObjectMetadata)
-					if !ok || bookmark == nil {
+					rv, ok := extractBookmarkResourceVersion(event.Object)
+					if !ok {
 						logger.Error(errors.New("failed to convert bookmark to metav1.PartialObjectMetadata"), "Skipping malformed bookmark event")
 						continue
 					}
 
-					logger.Info("Received bookmark event", "resourceVersion", bookmark.GetResourceVersion())
+					logger.Info("Received bookmark event", "resourceVersion", rv)
 					for {
-						rv := bookmark.GetResourceVersion()
 						lrv := lastResourceVersion.Load()
 						if natsort.Compare(rv, *lrv) {
 							break
@@ -1027,6 +1027,35 @@ func (r *HTTPTriggerReconciler) createTrigger(reconcileCtx context.Context, reco
 	}
 
 	return nil, nil
+}
+
+// extractBookmarkResourceVersion attempts to extract a resourceVersion from
+// a bookmark event object. It conservatively returns ("", false) when the
+// object has no accessible metadata or resourceVersion.
+func extractBookmarkResourceVersion(obj runtime.Object) (string, bool) {
+	if obj == nil {
+		return "", false
+	}
+
+	// Fast-path for the expected PartialObjectMetadata type.
+	if pom, ok := obj.(*metav1.PartialObjectMetadata); ok && pom != nil {
+		rv := pom.GetResourceVersion()
+		if rv == "" {
+			return "", false
+		}
+		return rv, true
+	}
+
+	// Generic accessor for objects that expose metav1.Object metadata
+	acc, err := meta.Accessor(obj)
+	if err != nil || acc == nil {
+		return "", false
+	}
+	rv := acc.GetResourceVersion()
+	if rv == "" {
+		return "", false
+	}
+	return rv, true
 }
 
 func (r *HTTPTriggerReconciler) WatchInit(ctx context.Context) error {

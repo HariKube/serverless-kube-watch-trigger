@@ -67,6 +67,8 @@ spec:
           metadata:
             name: event-filter-trigger
             namespace: event-filter
+            labels:
+              triggers.harikube.info/distribution: item-1
           spec:
             resource:
               apiVersion: v1

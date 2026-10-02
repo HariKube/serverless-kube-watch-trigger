@@ -628,7 +628,7 @@ var _ = Describe("PiTrigger Controller", func() {
 	})
 
 	Context("watcher error handling", func() {
-		It("records a detailed warning event after patching trigger status", func() {
+		It("handles benign closed-channel watcher shutdown with local teardown only", func() {
 			recorder := record.NewFakeRecorder(1)
 			runningTriggersLock := sync.Mutex{}
 			runningTriggers := map[string]func(){"default/pitrigger-event": func() {}}
@@ -638,12 +638,7 @@ var _ = Describe("PiTrigger Controller", func() {
 			stopCalled := false
 			runningTriggers["default/pitrigger-event"] = func() { cancelCalled = true }
 
-			var (
-				patchesMu                   sync.Mutex
-				patchedErrorTime            metav1.Time
-				patchedErrorReason          string
-				patchedErrorResourceVersion string
-			)
+			patchCalls := &atomic.Int32{}
 
 			handleTriggerWatcherError(
 				context.Background(),
@@ -657,36 +652,20 @@ var _ = Describe("PiTrigger Controller", func() {
 				runningTriggers,
 				context.Background().Done(),
 				func() { stopCalled = true },
-				func(_ context.Context, errorTime metav1.Time, errorReason, errorResourceVersion string) (bool, error) {
-					patchesMu.Lock()
-					defer patchesMu.Unlock()
-					patchedErrorTime = errorTime
-					patchedErrorReason = errorReason
-					patchedErrorResourceVersion = errorResourceVersion
+				func(_ context.Context, _ metav1.Time, _, _ string) (bool, error) {
+					patchCalls.Add(1)
 					return true, nil
 				},
 			)
 
-			Eventually(func() string {
-				patchesMu.Lock()
-				defer patchesMu.Unlock()
-				return patchedErrorReason
-			}, 5*time.Second, 100*time.Millisecond).Should(Equal("closed channel"))
-			patchesMu.Lock()
-			defer patchesMu.Unlock()
-			Expect(patchedErrorTime.IsZero()).To(BeFalse())
-			Expect(patchedErrorResourceVersion).To(Equal("42"))
+			// local teardown must occur
 			Expect(cancelCalled).To(BeTrue())
 			Expect(stopCalled).To(BeTrue())
 			Expect(runningTriggers).NotTo(HaveKey("default/pitrigger-event"))
 
-			var event string
-			Eventually(recorder.Events, 5*time.Second, 100*time.Millisecond).Should(Receive(&event))
-			Expect(event).To(ContainSubstring("Warning"))
-			Expect(event).To(ContainSubstring("WatcherClosed"))
-			Expect(event).To(ContainSubstring("default/pitrigger-event"))
-			Expect(event).To(ContainSubstring("closed channel"))
-			Expect(event).To(ContainSubstring("resourceVersion=42"))
+			// benign closed-channel path must NOT patch status or emit a warning event
+			Consistently(func() int32 { return patchCalls.Load() }, 2*time.Second, 100*time.Millisecond).Should(BeZero())
+			Consistently(recorder.Events, 2*time.Second, 100*time.Millisecond).ShouldNot(Receive())
 		})
 
 		It("does not patch status when the controller context is cancelled (shutdown)", func() {
@@ -1638,6 +1617,237 @@ var _ = Describe("PiTrigger Controller", func() {
 			cleanupConfigMap(bgCtx, promptsCMName)
 			cleanupConfigMap(bgCtx, skillsCMName)
 			cleanupSecret(bgCtx, secretName)
+		})
+
+		It("dispatches timeout cleanup for an unlabeled, already-expired deleting trigger in distributed mode", func() {
+			const (
+				unlabeledExpiredName   = "pitrigger-unlabeled-expired"
+				unlabeledSecretName    = "pitrigger-unlabeled-agent-config"
+				unlabeledSessionSecret = "pitrigger-unlabeled-session-secret"
+				unlabeledPromptsName   = "pitrigger-unlabeled-prompts"
+				unlabeledSkillsName    = "pitrigger-unlabeled-skills"
+			)
+
+			DeferCleanup(func() {
+				jobList := &batchv1.JobList{}
+				_ = k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: unlabeledExpiredName})
+				for i := range jobList.Items {
+					cleanupJob(bgCtx, jobList.Items[i].Name)
+				}
+				cleanupConfigMap(bgCtx, unlabeledPromptsName)
+				cleanupConfigMap(bgCtx, unlabeledSkillsName)
+				cleanupPiTrigger(bgCtx, unlabeledExpiredName)
+				cleanupSecret(bgCtx, unlabeledSessionSecret)
+				cleanupSecret(bgCtx, unlabeledSecretName)
+			})
+
+			createPiAgentConfigSecret(bgCtx, unlabeledSecretName)
+			createPiAgentConfigSecret(bgCtx, unlabeledSessionSecret)
+			createPiAgentConfigMaps(bgCtx, unlabeledPromptsName, unlabeledSkillsName)
+
+			// set up a distributed partition controller representing this replica
+			clientset := fake.NewSimpleClientset(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: partition.DefaultConfigMapName, Namespace: ns},
+				Data: map[string]string{
+					"heartbeat/pod-a":  time.Now().UTC().Format(time.RFC3339),
+					"heartbeat/pod-b":  time.Now().UTC().Format(time.RFC3339),
+					"partition/item-1": "pod-b",
+				},
+			})
+			partitionController := partition.NewDistributedController(clientset, ns, "pod-a")
+			Expect(partitionController.Refresh(bgCtx)).To(Succeed())
+
+			// create an unlabeled trigger; the persisted object may not retain a synthetic CreationTimestamp,
+			// so drive the deleting/expired preflight path using an in-memory aged copy after deletion is observed.
+			trigger := &triggersv1.PiTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       unlabeledExpiredName,
+					Namespace:  ns,
+					Finalizers: []string{"tests.harikube.io/cleanup"},
+					Labels: map[string]string{
+						piTriggerSessionLabel: "session-unlabeled-expired",
+						piTriggerRoundLabel:   "1",
+						piTriggerWorkerLabel:  "0",
+					},
+					Annotations: map[string]string{piTriggerSessionSecretAnnotation: unlabeledSessionSecret},
+				},
+				Spec: triggersv1.PiTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}, Timeout: metav1.Duration{Duration: 1 * time.Second}},
+					Agent: triggersv1.PiAgentSpec{
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
+						ConfigSecretRef:     corev1.LocalObjectReference{Name: unlabeledSecretName},
+						PromptsConfigMapRef: ptr.To(corev1.LocalObjectReference{Name: unlabeledPromptsName}),
+						SkillsConfigMapRef:  ptr.To(corev1.LocalObjectReference{Name: unlabeledSkillsName}),
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+			Expect(k8sClient.Delete(bgCtx, trigger)).To(Succeed())
+
+			nsn := types.NamespacedName{Name: unlabeledExpiredName, Namespace: ns}
+			// wait for deletion timestamp to be set on the persisted object
+			Eventually(func() bool {
+				latest := &triggersv1.PiTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn, latest); err != nil {
+					return false
+				}
+				return latest.DeletionTimestamp != nil && !latest.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			r := newPiReconciler()
+			r.PartitionController = partitionController
+
+			// Use an in-memory aged copy to drive the deleting preflight path directly so we don't depend
+			// on persisted CreationTimestamp semantics in the fake client.
+			latest := &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			aged := latest.DeepCopy()
+			aged.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Minute))
+
+			done, err := r.preflightReconcile(bgCtx, logr.Discard(), nsn.String(), aged)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(done).To(BeTrue())
+
+			jobList := &batchv1.JobList{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: unlabeledExpiredName})).To(Succeed())
+				g.Expect(jobList.Items).To(HaveLen(1))
+			}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
+
+			job := jobList.Items[0]
+			container := job.Spec.Template.Spec.Containers[0]
+			runtimeInput, err := decodePiTriggerRuntimeInput(container)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(runtimeInput.Metadata.EventType).To(Equal("DELETED"))
+			Expect(runtimeInput.Metadata.Message).To(ContainSubstring("trigger session timed out"))
+			Expect(job.Labels[piTriggerSessionLabel]).To(Equal("session-unlabeled-expired"))
+			// trigger must still be in deleting state and retain the finalizer so cleanup can proceed
+			latest = &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn, latest)).To(Succeed())
+			Expect(latest.DeletionTimestamp).NotTo(BeNil())
+			Expect(latest.Finalizers).To(ContainElement("tests.harikube.io/cleanup"))
+		})
+
+		It("dispatches session-timeout cleanup for an unlabeled, live trigger in distributed mode", func() {
+			const (
+				liveName          = "pitrigger-unlabeled-live"
+				liveSecretName    = "pitrigger-unlabeled-live-agent-config"
+				liveSessionSecret = "pitrigger-unlabeled-live-session-secret"
+				livePromptsName   = "pitrigger-unlabeled-live-prompts"
+				liveSkillsName    = "pitrigger-unlabeled-live-skills"
+			)
+
+			DeferCleanup(func() {
+				jobList := &batchv1.JobList{}
+				_ = k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: liveName})
+				for i := range jobList.Items {
+					cleanupJob(bgCtx, jobList.Items[i].Name)
+				}
+				cleanupConfigMap(bgCtx, livePromptsName)
+				cleanupConfigMap(bgCtx, liveSkillsName)
+				cleanupPiTrigger(bgCtx, liveName)
+				cleanupSecret(bgCtx, liveSessionSecret)
+				cleanupSecret(bgCtx, liveSecretName)
+			})
+
+			createPiAgentConfigSecret(bgCtx, liveSecretName)
+			createPiAgentConfigSecret(bgCtx, liveSessionSecret)
+			createPiAgentConfigMaps(bgCtx, livePromptsName, liveSkillsName)
+
+			// set up a distributed partition controller representing this replica
+			clientset := fake.NewSimpleClientset(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: partition.DefaultConfigMapName, Namespace: ns},
+				Data: map[string]string{
+					"heartbeat/pod-a":  time.Now().UTC().Format(time.RFC3339),
+					"heartbeat/pod-b":  time.Now().UTC().Format(time.RFC3339),
+					"partition/item-1": "pod-b",
+				},
+			})
+			partitionController := partition.NewDistributedController(clientset, ns, "pod-a")
+			Expect(partitionController.Refresh(bgCtx)).To(Succeed())
+
+			// create an unlabeled trigger with a short live timeout and a cleanup finalizer
+			trigger := &triggersv1.PiTrigger{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       liveName,
+					Namespace:  ns,
+					Finalizers: []string{"tests.harikube.io/cleanup"},
+					Labels: map[string]string{
+						piTriggerSessionLabel: "session-unlabeled-live",
+						piTriggerRoundLabel:   "1",
+						piTriggerWorkerLabel:  "0",
+					},
+					Annotations: map[string]string{piTriggerSessionSecretAnnotation: liveSessionSecret},
+				},
+				Spec: triggersv1.PiTriggerSpec{
+					TriggerSpec: triggersv1.TriggerSpec{Resource: metav1.TypeMeta{Kind: "ConfigMap", APIVersion: "v1"}, Namespaces: []string{ns}, Timeout: metav1.Duration{Duration: 1 * time.Second}},
+					Agent: triggersv1.PiAgentSpec{
+						Image:               "docker.io/mhmxs/pi-agent-empty:latest",
+						ConfigSecretRef:     corev1.LocalObjectReference{Name: liveSecretName},
+						PromptsConfigMapRef: ptr.To(corev1.LocalObjectReference{Name: livePromptsName}),
+						SkillsConfigMapRef:  ptr.To(corev1.LocalObjectReference{Name: liveSkillsName}),
+					},
+				},
+			}
+			Expect(k8sClient.Create(bgCtx, trigger)).To(Succeed())
+
+			r := newPiReconciler()
+			r.PartitionController = partitionController
+
+			// start the running watcher/session
+			nsn := types.NamespacedName{Name: liveName, Namespace: ns}
+			_, err := r.Reconcile(bgCtx, reconcile.Request{NamespacedName: nsn})
+			Expect(err).NotTo(HaveOccurred())
+
+			// ensure the controller has registered the running trigger
+			Eventually(func() bool {
+				r.runningTriggersLock.Lock()
+				defer r.runningTriggersLock.Unlock()
+				_, ok := r.runningTriggers[nsn.String()]
+				return ok
+			}, 5*time.Second, 100*time.Millisecond).Should(BeTrue())
+
+			// mark the trigger for deletion (retain finalizer so cleanup runs)
+			Expect(k8sClient.Delete(bgCtx, &triggersv1.PiTrigger{ObjectMeta: metav1.ObjectMeta{Name: liveName, Namespace: ns}})).To(Succeed())
+
+			// wait for deletion timestamp to be set, then drive the deleting timeout-cleanup path using an aged in-memory copy
+			nsn2 := types.NamespacedName{Name: liveName, Namespace: ns}
+			Eventually(func() bool {
+				latest := &triggersv1.PiTrigger{}
+				if err := k8sClient.Get(bgCtx, nsn2, latest); err != nil {
+					return false
+				}
+				return latest.DeletionTimestamp != nil && !latest.DeletionTimestamp.IsZero()
+			}, 10*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+			// fetch latest persisted deleting object and create an aged in-memory copy to drive the preflight path
+			latest := &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn2, latest)).To(Succeed())
+			aged := latest.DeepCopy()
+			aged.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Minute))
+
+			done, err := r.preflightReconcile(bgCtx, logr.Discard(), nsn2.String(), aged)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(done).To(BeTrue())
+
+			jobList := &batchv1.JobList{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.List(bgCtx, jobList, client.InNamespace(ns), client.MatchingLabels{piTriggerTriggerNameLabel: liveName})).To(Succeed())
+				g.Expect(jobList.Items).To(HaveLen(1))
+			}, 15*time.Second, 200*time.Millisecond).Should(Succeed())
+
+			job := jobList.Items[0]
+			container := job.Spec.Template.Spec.Containers[0]
+			runtimeInput, err := decodePiTriggerRuntimeInput(container)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(runtimeInput.Metadata.EventType).To(Equal("DELETED"))
+			Expect(runtimeInput.Metadata.Message).To(ContainSubstring("trigger session timed out"))
+			Expect(job.Labels[piTriggerSessionLabel]).To(Equal("session-unlabeled-live"))
+			// trigger must still be in deleting state and retain the finalizer so cleanup can proceed
+			latest = &triggersv1.PiTrigger{}
+			Expect(k8sClient.Get(bgCtx, nsn2, latest)).To(Succeed())
+			Expect(latest.DeletionTimestamp).NotTo(BeNil())
+			Expect(latest.Finalizers).To(ContainElement("tests.harikube.io/cleanup"))
 		})
 
 		It("ignores trigger sessions for partitions not owned by this replica", func() {

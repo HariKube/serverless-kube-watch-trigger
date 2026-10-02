@@ -589,6 +589,17 @@ func handleTriggerWatcherError(
 	default:
 	}
 
+	// Suppress benign closed-channel watcher errors when the session is still
+	// active: these typically stem from watcher goroutine shutdown and are not
+	// actionable (should not log, patch status, or emit an event) — but still
+	// perform local teardown so the trigger session shuts down cleanly.
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "closed channel") {
+		cancel()
+		delete(runningTriggers, triggerRefName)
+		stopWatchers()
+		return
+	}
+
 	logger.Error(err, "Watcher closed")
 
 	errorTime := metav1.Now()

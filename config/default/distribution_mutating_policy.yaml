@@ -1,0 +1,33 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: trigger-distribution-labeler
+spec:
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["triggers.harikube.info"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httptriggers", "pitriggers"]
+  mutations:
+  - patchType: ApplyConfiguration
+    applyConfiguration:
+      expression: >
+        Object{metadata: Object.metadata{labels: {
+          "triggers.harikube.info/distribution": "item-" + string(1 + ((size(object.metadata.namespace) + size(object.metadata.name)) % 100))
+        }}}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: trigger-distribution-labeler
+spec:
+  policyName: trigger-distribution-labeler
+  matchResources:
+    resourceRules:
+      - apiGroups: ["triggers.harikube.info"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httptriggers", "pitriggers"]

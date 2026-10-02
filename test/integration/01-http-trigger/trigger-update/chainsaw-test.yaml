@@ -67,6 +67,8 @@ spec:
           metadata:
             name: trigger-update-test
             namespace: trigger-update
+            labels:
+              "triggers.harikube.info/distribution": "item-1"
           spec:
             resource:
               apiVersion: v1
