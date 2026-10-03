@@ -221,6 +221,34 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// helper to consolidate metrics, classification and logging for failed
+// attempts. It returns the canonical retry error to be used by the caller.
+func handleAttemptFailure(logger logr.Logger, kind, triggerRefName, method string, metadata map[string]interface{}, transportErr error, statusCode int, latency time.Duration) error {
+	class := classifyHTTPError(transportErr, statusCode)
+	if transportErr != nil {
+		recordDeliveryCall(metricResultError, 0, latency, kind, triggerRefName, method)
+		recordDeliveryFailure(kind, triggerRefName, method, metricFailureReasonRequest)
+		recordDeliveryHTTPClass(kind, triggerRefName, method, class)
+		logger.Error(transportErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "failureClass", class)
+
+		return transportErr
+	}
+
+	var baseErr error
+	if statusCode == 0 {
+		baseErr = errors.New("missing response")
+	} else {
+		baseErr = fmt.Errorf("status code is %d", statusCode)
+	}
+
+	recordDeliveryCall(metricResultError, statusCode, latency, kind, triggerRefName, method)
+	recordDeliveryFailure(kind, triggerRefName, method, metricFailureReasonStatus)
+	recordDeliveryHTTPClass(kind, triggerRefName, method, class)
+	logger.Error(baseErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "failureClass", class)
+
+	return baseErr
+}
+
 // deliverPayload performs up to retries+1 attempts to call the configured
 // endpoint, backing off exponentially between attempts and recording
 // per-trigger delivery metrics. It returns true when an attempt received a
@@ -268,57 +296,27 @@ func deliverPayload(
 		latency := time.Since(attemptStart)
 		reqCancel()
 
-		if err != nil {
-			// classify the transport-level error (network/timeout/other) and record
-			// both the legacy failure reason and the new stable failure class.
-			class := classifyHTTPError(err, 0)
-			recordDeliveryCall(metricResultError, 0, latency, kind, triggerRefName, method)
-			recordDeliveryFailure(kind, triggerRefName, method, metricFailureReasonRequest)
-			recordDeliveryHTTPClass(kind, triggerRefName, method, class)
-			logger.Error(err, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "failureClass", class)
-
-			// wrap the original error with a concise, stable classification so
-			// callers and logs get both the underlying error and a low-cardinality
-			// label for aggregation.
-			retryErr = err
-
-			reqCancel()
-
-			if attempt < int(retries) {
-				recordDeliveryRetry(kind, triggerRefName, method, metricResultError)
-				if !sleepContext(ctx, backoff.delay(attempt)) {
-					return false, retryErr
-				}
-			}
-
-			continue
-		} else if resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			// classify the HTTP status-based failure using the helper. When resp is
-			// nil we still classify as an unknown/status_unknown class.
+		// On any transport error or non-2xx response consolidate the common
+		// classification, metric emission and logging into the helper above and
+		// then perform the remaining per-attempt cleanup (duplicate in the old
+		// implementation): a second reqCancel(), optional response body close,
+		// and the retry/sleep bookkeeping.
+		if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			statusCode := 0
 			if resp != nil {
 				statusCode = resp.StatusCode
 			}
-			class := classifyHTTPError(nil, statusCode)
 
-			var baseErr error
-			if resp == nil {
-				baseErr = errors.New("missing response")
-			} else {
-				baseErr = fmt.Errorf("status code is %d", resp.StatusCode)
-			}
+			// compute the canonical retry error and emit metrics/logs.
+			retryErr = handleAttemptFailure(logger, kind, triggerRefName, method, metadata, err, statusCode, latency)
 
-			retryErr = baseErr
-
-			recordDeliveryCall(metricResultError, statusCode, latency, kind, triggerRefName, method)
-			recordDeliveryFailure(kind, triggerRefName, method, metricFailureReasonStatus)
-			recordDeliveryHTTPClass(kind, triggerRefName, method, class)
-			logger.Error(retryErr, "Endpoint call failed", "name", metadata["name"], "namespace", metadata["namespace"], "resourceVersion", metadata["resourceVersion"], "failureClass", class)
-
+			// preserve the original behaviour of calling the cancel function a
+			// second time in the failure path and then closing the response body
+			// (when present) after cancellation.
 			reqCancel()
 			if resp != nil {
-				if err := resp.Body.Close(); err != nil {
-					logger.Error(err, "Failed to close response body")
+				if cerr := resp.Body.Close(); cerr != nil {
+					logger.Error(cerr, "Failed to close response body")
 
 					return false, retryErr
 				}

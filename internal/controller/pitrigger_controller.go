@@ -183,6 +183,10 @@ func (r *PiTriggerReconciler) stopRunningTrigger(triggerRefName string) {
 }
 
 func (r *PiTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) func() {
+	// Prefer an explicit running trigger cancel function; fall back to any
+	// session.stop present for this trigger. We intentionally allow a nil
+	// stored cancel to fall through to the session stop (matching prior
+	// behavior).
 	var stopFn func()
 	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
 		stopFn = cancel
@@ -192,14 +196,21 @@ func (r *PiTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) 
 			stopFn = session.stop
 		}
 	}
+
+	// Clear any running entries for this trigger.
 	delete(r.runningTriggers, triggerRefName)
 	delete(r.runningTriggerSessions, triggerRefName)
+
+	// Only record a session stop metric if we actually have a stop fn to call.
 	if stopFn != nil {
 		recordControllerSessionStop(metricControllerPiTrigger)
 	}
+
+	// Always unregister the deletion watcher task if present.
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.UnregisterTask(triggerRefName)
 	}
+
 	return stopFn
 }
 

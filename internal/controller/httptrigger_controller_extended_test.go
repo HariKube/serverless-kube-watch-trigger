@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -37,9 +38,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	unstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -49,6 +53,7 @@ import (
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/watcher"
 )
 
 // drainRunningTriggers stops every running trigger and clears the registry.
@@ -85,6 +90,147 @@ func newReconciler() *HTTPTriggerReconciler {
 		drainRunningTriggers(r)
 	})
 	return r
+}
+
+// Unit tests for detachRunningTriggerLocked behavior (HTTPTriggerReconciler).
+func TestDetachRunningTriggerLockedPrefersRunningTriggersCancelHTTP(t *testing.T) {
+	r := &HTTPTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	ref := "default/detach-prefers-cancel"
+	// ensure session map is initialized for test
+	r.runningTriggerSessions = map[string]*httpTriggerSession{}
+
+	cancelCalled := false
+	r.runningTriggersLock.Lock()
+	r.runningTriggers[ref] = func() { cancelCalled = true }
+	r.runningTriggerSessions[ref] = &httpTriggerSession{stop: func() { t.Fatalf("session stop should not be preferred when runningTriggers has a cancel") }}
+
+	stopFn := r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	if stopFn == nil {
+		t.Fatalf("expected non-nil stop function when runningTriggers contains a cancel")
+	}
+
+	stopFn()
+	if !cancelCalled {
+		t.Fatalf("expected cancel from runningTriggers to be invoked")
+	}
+
+	r.runningTriggersLock.Lock()
+	if _, ok := r.runningTriggers[ref]; ok {
+		t.Fatalf("expected runningTriggers entry to be cleared for %s", ref)
+	}
+	if _, ok := r.runningTriggerSessions[ref]; ok {
+		t.Fatalf("expected runningTriggerSessions entry to be cleared for %s", ref)
+	}
+	r.runningTriggersLock.Unlock()
+}
+
+func TestDetachRunningTriggerLockedFallsBackToSessionStopHTTP(t *testing.T) {
+	r := &HTTPTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	ref := "default/detach-fallback-session"
+	// initialize session map
+	r.runningTriggerSessions = map[string]*httpTriggerSession{}
+
+	sessionCalled := false
+	// ensure no cancel in runningTriggers
+	r.runningTriggersLock.Lock()
+	delete(r.runningTriggers, ref)
+	r.runningTriggerSessions[ref] = &httpTriggerSession{stop: func() { sessionCalled = true }}
+
+	stopFn := r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	if stopFn == nil {
+		t.Fatalf("expected non-nil stop function when runningTriggerSessions contains a session")
+	}
+
+	stopFn()
+	if !sessionCalled {
+		t.Fatalf("expected session stop to be invoked when no runningTriggers cancel present")
+	}
+
+	r.runningTriggersLock.Lock()
+	if _, ok := r.runningTriggers[ref]; ok {
+		t.Fatalf("expected runningTriggers entry to be cleared for %s", ref)
+	}
+	if _, ok := r.runningTriggerSessions[ref]; ok {
+		t.Fatalf("expected runningTriggerSessions entry to be cleared for %s", ref)
+	}
+	r.runningTriggersLock.Unlock()
+}
+
+func TestDetachRunningTriggerLockedUnregistersDeletionWatcherHTTP(t *testing.T) {
+	ctx := context.Background()
+	fakeWatch := watch.NewRaceFreeFake()
+	listWatch := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return &triggersv1.HTTPTriggerList{}, nil
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return fakeWatch, nil
+		},
+	}
+	informer := cache.NewSharedIndexInformer(listWatch, &triggersv1.HTTPTrigger{}, 0, cache.Indexers{})
+
+	stopCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go informer.Run(stopCtx.Done())
+	if !cache.WaitForCacheSync(stopCtx.Done(), informer.HasSynced) {
+		t.Fatalf("failed to sync informer cache")
+	}
+
+	w := watcher.NewGlobalDeletionWatcher()
+	if err := w.Start(stopCtx, informer); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+
+	ref := "default/detach-unregister"
+	var cancelled atomic.Bool
+	w.RegisterTask(ref, func() { cancelled.Store(true) })
+
+	r := &HTTPTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	r.runningTriggerSessions = map[string]*httpTriggerSession{}
+	r.DeletionWatcher = w
+
+	// attach a dummy session so detach path will call UnregisterTask
+	r.runningTriggersLock.Lock()
+	r.runningTriggerSessions[ref] = &httpTriggerSession{stop: func() {}}
+	_ = r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	// deleting the resource should NOT cancel because it was unregistered
+	fakeWatch.Delete(&triggersv1.HTTPTrigger{ObjectMeta: metav1.ObjectMeta{Name: "detach-unregister", Namespace: "default"}})
+
+	<-time.After(500 * time.Millisecond)
+	// expected: no cancellation
+	if cancelled.Load() {
+		t.Fatalf("expected registered task to be unregistered and not cancelled on delete")
+	}
 }
 
 // cleanupTrigger deletes a named HTTPTrigger silently.

@@ -130,23 +130,31 @@ func (r *HTTPTriggerReconciler) stopRunningTrigger(triggerRefName string) {
 // detachRunningTriggerLocked removes the watcher session bookkeeping for a trigger and
 // returns the stop function that must be invoked after releasing runningTriggersLock.
 func (r *HTTPTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) func() {
-	var stopFn func()
-	if cancel, ok := r.runningTriggers[triggerRefName]; ok {
-		stopFn = cancel
-	}
+	// Prefer an explicit running trigger cancel function; fall back to any
+	// session.stop present for this trigger. We intentionally allow a nil
+	// stored cancel to fall through to the session stop (matching prior
+	// behavior).
+	stopFn := r.runningTriggers[triggerRefName]
 	if stopFn == nil {
-		if session, ok := r.runningTriggerSessions[triggerRefName]; ok && session != nil {
+		if session := r.runningTriggerSessions[triggerRefName]; session != nil {
 			stopFn = session.stop
 		}
 	}
+
+	// Clear any running entries for this trigger.
 	delete(r.runningTriggers, triggerRefName)
 	delete(r.runningTriggerSessions, triggerRefName)
+
+	// Only record a session stop metric if we actually have a stop fn to call.
 	if stopFn != nil {
 		recordControllerSessionStop(metricControllerHTTPTrigger)
 	}
+
+	// Always unregister the deletion watcher task if present.
 	if r.DeletionWatcher != nil {
 		r.DeletionWatcher.UnregisterTask(triggerRefName)
 	}
+
 	return stopFn
 }
 

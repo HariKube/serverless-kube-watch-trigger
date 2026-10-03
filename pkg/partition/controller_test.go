@@ -117,3 +117,36 @@ func TestDistributedControllerHonorsExplicitDeadmanTimeoutWhenSafe(t *testing.T)
 		t.Fatalf("expected explicit deadman timeout to be preserved, got %s", controller.deadmanTimeout)
 	}
 }
+
+func TestDistributedControllerNamespaceToleranceAndPreservation(t *testing.T) {
+	const ns = "operators"
+
+	// explicit namespace preserved via NewDistributedControllerWithOptions
+	ctrlWithOpts := NewDistributedControllerWithOptions(
+		k8sfake.NewSimpleClientset(),
+		ns,
+		"pod-a",
+		Options{},
+	)
+	if ctrlWithOpts.namespace != ns {
+		t.Fatalf("expected explicit namespace to be preserved, got %q", ctrlWithOpts.namespace)
+	}
+
+	// explicit namespace preserved via NewDistributedController
+	ctrl := NewDistributedController(k8sfake.NewSimpleClientset(), ns, "pod-a")
+	if ctrl.namespace != ns {
+		t.Fatalf("expected explicit namespace to be preserved, got %q", ctrl.namespace)
+	}
+
+	// empty namespace provided as an empty string (WithOptions) is normalized to "default"
+	emptyCtrl := NewDistributedControllerWithOptions(k8sfake.NewSimpleClientset(), "", "pod-a", Options{})
+	if emptyCtrl.namespace != "default" {
+		t.Fatalf("expected empty namespace input to be normalized to %q, got %q", "default", emptyCtrl.namespace)
+	}
+
+	// empty namespace provided as an empty string (NewDistributedController) is normalized to "default"
+	emptyCtrl2 := NewDistributedController(k8sfake.NewSimpleClientset(), "", "pod-a")
+	if emptyCtrl2.namespace != "default" {
+		t.Fatalf("expected empty namespace input to be normalized to %q, got %q", "default", emptyCtrl2.namespace)
+	}
+}

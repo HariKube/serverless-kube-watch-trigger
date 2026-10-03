@@ -17,6 +17,7 @@ import (
 	triggersv1 "github.com/harikube/serverless-kube-watch-trigger/api/v1"
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/lease"
 	"github.com/harikube/serverless-kube-watch-trigger/pkg/partition"
+	"github.com/harikube/serverless-kube-watch-trigger/pkg/watcher"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -27,7 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 
@@ -234,6 +237,147 @@ func TestAssemblePiWorkerJob_PreservesServiceAccountName(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.ServiceAccountName != "pi-agent-worker" {
 		t.Fatalf("expected serviceAccountName to be preserved, got %q", job.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
+// Unit tests for detachRunningTriggerLocked behavior.
+func TestDetachRunningTriggerLockedPrefersRunningTriggersCancel(t *testing.T) {
+	r := &PiTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	ref := "default/detach-prefers-cancel"
+	// ensure session map is initialized for test
+	r.runningTriggerSessions = map[string]*piTriggerSession{}
+
+	cancelCalled := false
+	r.runningTriggersLock.Lock()
+	r.runningTriggers[ref] = func() { cancelCalled = true }
+	r.runningTriggerSessions[ref] = &piTriggerSession{stop: func() { t.Fatalf("session stop should not be preferred when runningTriggers has a cancel") }}
+
+	stopFn := r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	if stopFn == nil {
+		t.Fatalf("expected non-nil stop function when runningTriggers contains a cancel")
+	}
+
+	stopFn()
+	if !cancelCalled {
+		t.Fatalf("expected cancel from runningTriggers to be invoked")
+	}
+
+	r.runningTriggersLock.Lock()
+	if _, ok := r.runningTriggers[ref]; ok {
+		t.Fatalf("expected runningTriggers entry to be cleared for %s", ref)
+	}
+	if _, ok := r.runningTriggerSessions[ref]; ok {
+		t.Fatalf("expected runningTriggerSessions entry to be cleared for %s", ref)
+	}
+	r.runningTriggersLock.Unlock()
+}
+
+func TestDetachRunningTriggerLockedFallsBackToSessionStop(t *testing.T) {
+	r := &PiTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	ref := "default/detach-fallback-session"
+	// initialize session map
+	r.runningTriggerSessions = map[string]*piTriggerSession{}
+
+	sessionCalled := false
+	// ensure no cancel in runningTriggers
+	r.runningTriggersLock.Lock()
+	delete(r.runningTriggers, ref)
+	r.runningTriggerSessions[ref] = &piTriggerSession{stop: func() { sessionCalled = true }}
+
+	stopFn := r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	if stopFn == nil {
+		t.Fatalf("expected non-nil stop function when runningTriggerSessions contains a session")
+	}
+
+	stopFn()
+	if !sessionCalled {
+		t.Fatalf("expected session stop to be invoked when no runningTriggers cancel present")
+	}
+
+	r.runningTriggersLock.Lock()
+	if _, ok := r.runningTriggers[ref]; ok {
+		t.Fatalf("expected runningTriggers entry to be cleared for %s", ref)
+	}
+	if _, ok := r.runningTriggerSessions[ref]; ok {
+		t.Fatalf("expected runningTriggerSessions entry to be cleared for %s", ref)
+	}
+	r.runningTriggersLock.Unlock()
+}
+
+func TestDetachRunningTriggerLockedUnregistersDeletionWatcher(t *testing.T) {
+	ctx := context.Background()
+	fakeWatch := watch.NewRaceFreeFake()
+	listWatch := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return &triggersv1.PiTriggerList{}, nil
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return fakeWatch, nil
+		},
+	}
+	informer := cache.NewSharedIndexInformer(listWatch, &triggersv1.PiTrigger{}, 0, cache.Indexers{})
+
+	stopCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go informer.Run(stopCtx.Done())
+	if !cache.WaitForCacheSync(stopCtx.Done(), informer.HasSynced) {
+		t.Fatalf("failed to sync informer cache")
+	}
+
+	w := watcher.NewGlobalDeletionWatcher()
+	if err := w.Start(stopCtx, informer); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+
+	ref := "default/detach-unregister"
+	var cancelled atomic.Bool
+	w.RegisterTask(ref, func() { cancelled.Store(true) })
+
+	r := &PiTriggerReconciler{
+		Recorder:            record.NewFakeRecorder(10),
+		PartitionController: partition.NewSingleWorkerController(),
+		ctx:                 context.Background(),
+		runningTriggersLock: sync.Mutex{},
+		runningTriggers:     map[string]func(){},
+		triggerLocksLock:    sync.Mutex{},
+		triggerLocks:        map[string]*sync.Mutex{},
+	}
+	r.runningTriggerSessions = map[string]*piTriggerSession{}
+	r.DeletionWatcher = w
+
+	// attach a dummy session so detach path will call UnregisterTask
+	r.runningTriggersLock.Lock()
+	r.runningTriggerSessions[ref] = &piTriggerSession{stop: func() {}}
+	_ = r.detachRunningTriggerLocked(ref)
+	r.runningTriggersLock.Unlock()
+
+	// deleting the resource should NOT cancel because it was unregistered
+	fakeWatch.Delete(&triggersv1.PiTrigger{ObjectMeta: metav1.ObjectMeta{Name: "detach-unregister", Namespace: "default"}})
+
+	<-time.After(500 * time.Millisecond)
+	// expected: no cancellation
+	if cancelled.Load() {
+		t.Fatalf("expected registered task to be unregistered and not cancelled on delete")
 	}
 }
 

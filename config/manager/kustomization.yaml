@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: harikube/serverless-kube-watch-trigger
-  newTag: rc-v1.0.0-7-87612
+  newTag: rc-v1.0.0-7-60cbf

@@ -22,6 +22,7 @@ const (
 	DistributionLabelKey        = "triggers.harikube.info/distribution"
 	DefaultConfigMapName        = "distribution-partition-map"
 	TotalPartitions             = 100
+	defaultNamespace            = "default"
 	defaultClaimRefreshInterval = 4 * time.Minute
 	defaultDeadmanTimeout       = 5 * time.Minute
 	deadmanGracePeriod          = time.Minute
@@ -80,10 +81,7 @@ func NewDistributedControllerWithOptions(
 	opts Options,
 ) *Controller {
 	if namespace == "" {
-		namespace = os.Getenv("POD_NAMESPACE")
-	}
-	if namespace == "" {
-		namespace = "default"
+		namespace = defaultNamespace
 	}
 	if podName == "" {
 		podName = os.Getenv("POD_NAME")
