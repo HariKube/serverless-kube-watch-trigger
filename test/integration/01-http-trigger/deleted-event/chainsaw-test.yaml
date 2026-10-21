@@ -115,7 +115,14 @@ spec:
     - sleep:
         duration: 5s
     - script:
-        content: kubectl logs -n deleted-event -l app=nginx-deleted | grep 'Go-http-client/1.1'
+        content: |
+          if kubectl logs -n deleted-event -l app=nginx-deleted | grep -q 'Go-http-client/1.1'; then
+            exit 0
+          else
+            echo "webhook was not triggered"
+            kubectl logs -n deleted-event -l app=nginx-deleted | tail -20
+            exit 1
+          fi
   - name: Create HTTP server
     try:
     - apply:

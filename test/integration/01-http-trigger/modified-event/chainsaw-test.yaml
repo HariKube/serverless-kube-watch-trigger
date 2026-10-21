@@ -118,7 +118,14 @@ spec:
     - sleep:
         duration: 5s
     - script:
-        content: kubectl logs -n modified-event -l app=nginx-modified | grep 'Go-http-client/1.1'
+        content: |
+          if kubectl logs -n modified-event -l app=nginx-modified | grep -q 'Go-http-client/1.1'; then
+            exit 0
+          else
+            echo "webhook was not triggered"
+            kubectl logs -n modified-event -l app=nginx-modified | tail -20
+            exit 1
+          fi
   - name: Cleanup test
     try:
     - delete:

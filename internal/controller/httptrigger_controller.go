@@ -161,10 +161,11 @@ func (r *HTTPTriggerReconciler) detachRunningTriggerLocked(triggerRefName string
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;delete;get;list;watch;patch;update
 
-// +kubebuilder:rbac:groups="",resources=secrets;services,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;delete;get;list;patch;update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;delete;get;list;patch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

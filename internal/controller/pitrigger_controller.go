@@ -217,10 +217,10 @@ func (r *PiTriggerReconciler) detachRunningTriggerLocked(triggerRefName string) 
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=pitriggers/finalizers,verbs=update
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;list;watch
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;delete;get;list;watch;patch;update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=create;delete;get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch;update
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;delete;get;list;patch;update
 
 func (r *PiTriggerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	recordReconcileStart(metricControllerPiTrigger)

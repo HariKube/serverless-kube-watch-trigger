@@ -18,14 +18,17 @@ rules:
   - ""
   resources:
   - events
+  - secrets
   verbs:
   - create
+  - delete
+  - get
+  - list
   - patch
   - update
 - apiGroups:
   - ""
   resources:
-  - secrets
   - services
   verbs:
   - get
@@ -37,7 +40,6 @@ rules:
   - jobs
   verbs:
   - create
-  - delete
   - get
   - list
   - watch
