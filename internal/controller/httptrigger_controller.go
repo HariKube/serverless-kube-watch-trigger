@@ -163,7 +163,7 @@ func (r *HTTPTriggerReconciler) detachRunningTriggerLocked(triggerRefName string
 // +kubebuilder:rbac:groups=triggers.harikube.info,resources=httptriggers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;delete;get;list;watch;patch;update
 
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;delete;get;list;patch;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=create;delete;get;list;watch;patch;update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;delete;get;list;patch;update
 
