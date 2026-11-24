@@ -173,7 +173,7 @@ spec:
         content: |
           set -euo pipefail
           NS="pi-trigger-simple"
-          CONTROLLER_NS="serverless-kube-watch-trigger-system"
+          CONTROLLER_NS="$(kubectl get deployment -A | grep trigger-controller | awk '{print $1}')"
           CONTROLLER="serverless-kube-watch-trigger-controller-manager"
           TRIGGER_NAME="pi-trigger-session-timeout"
 
@@ -224,13 +224,13 @@ spec:
         content: |
           set -euo pipefail
           NS="pi-trigger-simple"
-          CONTROLLER_NS="serverless-kube-watch-trigger-system"
+          CONTROLLER_NS="$(kubectl get deployment -A | grep trigger-controller | awk '{print $1}')"
           CONTROLLER="serverless-kube-watch-trigger-controller-manager"
           TRIGGER_NAME="pi-trigger-session-timeout"
 
           restore_controller() {
-            kubectl scale deployment ${CONTROLLER} -n ${CONTROLLER_NS} --replicas=1 || true
-            kubectl rollout status deployment/${CONTROLLER} -n ${CONTROLLER_NS} --timeout=180s || true
+            kubectl scale deployment ${CONTROLLER} -n ${CONTROLLER_NS} --replicas=1
+            kubectl rollout status deployment/${CONTROLLER} -n ${CONTROLLER_NS} --timeout=180s
           }
           trap restore_controller EXIT
           restore_controller
@@ -262,7 +262,7 @@ spec:
             sleep 2
           done
 
-          echo "expected an already-expired PiTrigger to retain its finalizer-protected deletion state and dispatch a deleted-event timeout job with identifying metadata"
+          echo "expected an already-expired PiTrigger ${TRIGGER_NAME} at ${NS} to retain its finalizer-protected deletion state and dispatch a deleted-event timeout job with identifying metadata"
           kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o yaml || true
           kubectl get jobs -n ${NS} -o yaml || true
           kubectl get configmaps -n ${NS} -o yaml || true
@@ -275,4 +275,4 @@ spec:
           NS="pi-trigger-simple"
           kubectl patch pitrigger pi-trigger-session-timeout -n ${NS} --type=merge -p '{"metadata":{"finalizers":[]}}' || true
           kubectl delete namespace ${NS} --ignore-not-found=true --wait=true || true
-          kubectl scale deployment serverless-kube-watch-trigger-controller-manager -n serverless-kube-watch-trigger-system --replicas=1 || true
+          kubectl scale deployment serverless-kube-watch-trigger-controller-manager -n $(kubectl get deployment -A | grep trigger-controller | awk '{print $1}') --replicas=1 || true

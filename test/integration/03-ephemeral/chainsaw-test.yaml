@@ -122,7 +122,7 @@ spec:
             sleep 2
           done
 
-          echo "expected the controller-driven PiTrigger timeout path to set deletionTimestamp and dispatch a deleted-event timeout job with identifying metadata for trigger session timed out"
+          echo "expected the controller-driven PiTrigger ${TRIGGER_NAME} at ${NS} timeout path to set deletionTimestamp and dispatch a deleted-event timeout job with identifying metadata for trigger session timed out"
           kubectl get pitrigger ${TRIGGER_NAME} -n ${NS} -o yaml || true
           kubectl get jobs -n ${NS} -o yaml || true
           kubectl get configmaps -n ${NS} -o yaml || true

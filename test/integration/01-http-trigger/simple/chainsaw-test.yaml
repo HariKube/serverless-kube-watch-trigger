@@ -111,7 +111,7 @@ spec:
           # a single patch and be missed permanently.
           for i in $(seq 1 8); do
             kubectl patch deployment serverless-kube-watch-trigger-controller-manager \
-              -n serverless-kube-watch-trigger-system --type=merge \
+              -n $(kubectl get deployment -A | grep trigger-controller | awk '{print $1}') --type=merge \
               -p "{\"metadata\":{\"labels\":{\"trigger\":\"change-$i\"}}}" >/dev/null 2>&1 || true
             sleep 2
             if kubectl logs -n simple -l app=nginx | grep -q 'Go-http-client/1.1'; then
