@@ -719,7 +719,13 @@ func (r *HTTPTriggerReconciler) createTrigger(reconcileCtx context.Context, reco
 	}
 
 	lastResourceVersion := atomic.Pointer[string]{}
-	lastResourceVersion.Store(ptr.To("0"))
+	// Initialize with the resourceVersion the watch was opened at so that
+	// reconnects resume from the correct position instead of "0".
+	if resourceVersion != "" {
+		lastResourceVersion.Store(ptr.To(resourceVersion))
+	} else {
+		lastResourceVersion.Store(ptr.To("0"))
+	}
 
 	var (
 		watchersMu      sync.Mutex
